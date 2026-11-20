@@ -1,0 +1,83 @@
+[
+ {
+  "id": 37976,
+  "iid": 1405,
+  "project_id": 598,
+  "title": "build: Turn on more compiler warnings",
+  "description": "Follows !1401–!1404.\n\n## Changes\n- **Warnings:** turned on the warnings that were disabled",
+  "state": "opened",
+  "draft": false,
+  "detailed_merge_status": "ci_still_running",
+  "source_branch": "feature/compiler-diagnostics",
+  "target_branch": "master",
+  "web_url": "https://gitlab.example.com/group/parser/-/merge_requests/1405",
+  "sha": "9f99c25d179ffccab1b8f042ecdb6af83ccb8607",
+  "has_conflicts": false,
+  "updated_at": "2026-10-30T15:08:34.393Z",
+  "created_at": "2026-10-30T15:08:33.471Z",
+  "references": {
+   "short": "!1405",
+   "relative": "parser!1405",
+   "full": "group/parser!1405"
+  },
+  "author": {
+   "username": "jdoe",
+   "name": "Doe, Jane"
+  },
+  "reviewers": []
+ },
+ {
+  "id": 37971,
+  "iid": 1404,
+  "project_id": 598,
+  "title": "core: Make lookup tables const",
+  "description": "Some lookup tables were mutable even though nothing writes to them. They are now const, which",
+  "state": "opened",
+  "draft": false,
+  "detailed_merge_status": "ci_still_running",
+  "source_branch": "feature/const-lookup-tables",
+  "target_branch": "master",
+  "web_url": "https://gitlab.example.com/group/parser/-/merge_requests/1404",
+  "sha": "2d5b2fcbbb59944f98dac58a941ee689f33cc27d",
+  "has_conflicts": false,
+  "updated_at": "2026-10-30T12:50:29.350Z",
+  "created_at": "2026-10-30T12:50:25.088Z",
+  "references": {
+   "short": "!1404",
+   "relative": "parser!1404",
+   "full": "group/parser!1404"
+  },
+  "author": {
+   "username": "jdoe",
+   "name": "Doe, Jane"
+  },
+  "reviewers": []
+ },
+ {
+  "id": 37970,
+  "iid": 1403,
+  "project_id": 598,
+  "title": "core: Remove an unused helper",
+  "description": "An unused conversion helper is removed.",
+  "state": "opened",
+  "draft": false,
+  "detailed_merge_status": "ci_still_running",
+  "source_branch": "feature/remove-dead-to-json",
+  "target_branch": "master",
+  "web_url": "https://gitlab.example.com/group/parser/-/merge_requests/1403",
+  "sha": "d407d1cd6733a3c55099c5fb52876b9c83406297",
+  "has_conflicts": false,
+  "updated_at": "2026-10-30T12:50:28.911Z",
+  "created_at": "2026-10-30T12:50:24.721Z",
+  "references": {
+   "short": "!1403",
+   "relative": "parser!1403",
+   "full": "group/parser!1403"
+  },
+  "author": {
+   "username": "jdoe",
+   "name": "Doe, Jane"
+  },
+  "reviewers": []
+ }
+]

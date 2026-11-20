@@ -1,0 +1,113 @@
+{
+ "continuation_token": null,
+ "count": 3,
+ "value": [
+  {
+   "comments": [
+    {
+     "author": {
+      "displayName": "Microsoft.VisualStudio.Services.TFS",
+      "uniqueName": ""
+     },
+     "commentType": "system",
+     "content": "The reference refs/heads/klee/1000-item-view was updated.",
+     "id": 1,
+     "lastContentUpdatedDate": "2026-10-29T21:55:52.52Z",
+     "lastUpdatedDate": "2026-10-29T21:55:52.52Z",
+     "parentCommentId": 0,
+     "publishedDate": "2026-10-29T21:55:52.52Z",
+     "usersLiked": []
+    }
+   ],
+   "id": 1317893,
+   "identities": {
+    "1": {
+     "_links": {
+      "avatar": {
+       "href": "https://dev.azure.com/example-org/_apis/GraphProfile/MemberAvatars/aad.AAAA"
+      }
+     },
+     "descriptor": "aad.AAAA",
+     "displayName": "Lee, Kim",
+     "id": "00000000-0000-4000-8000-000000000021",
+     "imageUrl": "https://dev.azure.com/example-org/_apis/GraphProfile/MemberAvatars/aad.AAAA",
+     "uniqueName": "klee@example.com",
+     "url": "https://vssps.example.com/_apis/Identities/00000000-0000-4000-8000-000000000021"
+    }
+   },
+   "isDeleted": false,
+   "lastUpdatedDate": "2026-10-29T21:55:52.52Z",
+   "properties": null,
+   "publishedDate": "2026-10-29T21:55:52.52Z",
+   "pullRequestThreadContext": null,
+   "threadContext": null
+  },
+  {
+   "comments": [
+    {
+     "author": {
+      "displayName": "Microsoft.VisualStudio.Services.TFS",
+      "uniqueName": ""
+     },
+     "commentType": "system",
+     "content": "The reference refs/heads/klee/1000-item-view was updated.",
+     "id": 1,
+     "lastContentUpdatedDate": "2026-10-30T14:00:05.697Z",
+     "lastUpdatedDate": "2026-10-30T14:00:05.697Z",
+     "parentCommentId": 0,
+     "publishedDate": "2026-10-30T14:00:05.697Z",
+     "usersLiked": []
+    }
+   ],
+   "id": 1319108,
+   "identities": {
+    "1": {
+     "_links": {
+      "avatar": {
+       "href": "https://dev.azure.com/example-org/_apis/GraphProfile/MemberAvatars/aad.AAAA"
+      }
+     },
+     "descriptor": "aad.AAAA",
+     "displayName": "Lee, Kim",
+     "id": "00000000-0000-4000-8000-000000000021",
+     "imageUrl": "https://dev.azure.com/example-org/_apis/GraphProfile/MemberAvatars/aad.AAAA",
+     "uniqueName": "klee@example.com",
+     "url": "https://vssps.example.com/_apis/Identities/00000000-0000-4000-8000-000000000021"
+    }
+   },
+   "isDeleted": false,
+   "lastUpdatedDate": "2026-10-30T14:00:05.697Z",
+   "properties": null,
+   "publishedDate": "2026-10-30T14:00:05.697Z",
+   "pullRequestThreadContext": null,
+   "threadContext": null
+  },
+  {
+   "comments": [
+    {
+     "author": {
+      "displayName": "Roe, Sam",
+      "uniqueName": "sroe@example.com"
+     },
+     "commentType": "text",
+     "content": "Reviewer notes (not for the description):\n\n- **One PR for #1004, #1005, and #1006.** The tests now run as a second user (#1005), and with access checks app",
+     "id": 1,
+     "lastContentUpdatedDate": "2026-10-30T00:20:59.163Z",
+     "lastUpdatedDate": "2026-10-30T00:20:59.163Z",
+     "parentCommentId": 0,
+     "publishedDate": "2026-10-30T00:20:59.163Z",
+     "usersLiked": []
+    }
+   ],
+   "id": 1318073,
+   "identities": null,
+   "isDeleted": false,
+   "lastUpdatedDate": "2026-10-30T00:20:59.163Z",
+   "properties": null,
+   "publishedDate": "2026-10-30T00:20:59.163Z",
+   "pullRequestThreadContext": null,
+   "status": "active",
+   "threadContext": null
+  }
+ ]
+}

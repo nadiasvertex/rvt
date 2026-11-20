@@ -1,0 +1,17 @@
+[package]
+name = "ctx"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+forge.workspace = true
+view.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+unicode-width.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }

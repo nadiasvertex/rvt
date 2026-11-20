@@ -1,0 +1,145 @@
+[
+ {
+  "pullRequestId": 183267,
+  "title": "Fix the layout of the confirmation dialog.",
+  "description": "Fix the layout of the confirmation dialog.\n\n![image.png](https://dev.azure.com/example-org/00000000-0000-4000-8000-000000000001/_apis/git/repositories/11c",
+  "isDraft": false,
+  "status": "active",
+  "mergeStatus": "succeeded",
+  "creationDate": "2026-10-30T15:10:36.925491+00:00",
+  "sourceRefName": "refs/heads/feature/fix-cancel-dialog",
+  "targetRefName": "refs/heads/master",
+  "lastMergeSourceCommit": {
+   "commitId": "a8b4ed4248e2a08d8fb3945b49c299d171a54714"
+  },
+  "lastMergeTargetCommit": {
+   "commitId": "f04a91e712584946a7d53945ee3b3232f9426ccb"
+  },
+  "createdBy": {
+   "displayName": "Doe, Jane",
+   "uniqueName": "jdoe@example.com"
+  },
+  "repository": {
+   "id": "00000000-0000-4000-8000-000000000011",
+   "name": "web-renderer"
+  },
+  "reviewers": [
+   {
+    "displayName": "[Project]\\Team",
+    "uniqueName": "vstfs:///Classification/TeamProject/00000000-0000-4000-8000-000000000001\\Team",
+    "vote": 0,
+    "isRequired": true
+   }
+  ]
+ },
+ {
+  "pullRequestId": 183248,
+  "title": "Item #1001: Check the public API in PR builds",
+  "description": "Run an API compatibility check in PR builds, so a breaking change fails the build unless the version changes",
+  "isDraft": false,
+  "status": "active",
+  "mergeStatus": "succeeded",
+  "creationDate": "2026-10-30T14:31:00.224904+00:00",
+  "sourceRefName": "refs/heads/feature/semver-checks",
+  "targetRefName": "refs/heads/master",
+  "lastMergeSourceCommit": {
+   "commitId": "c3868a4c4daa41f09826cb6b8b2debe85d02b0a8"
+  },
+  "lastMergeTargetCommit": {
+   "commitId": "869f8766c63efc80c18910a077f59c723dca2ca8"
+  },
+  "createdBy": {
+   "displayName": "Smith, Alex",
+   "uniqueName": "asmith@example.com"
+  },
+  "repository": {
+   "id": "00000000-0000-4000-8000-000000000012",
+   "name": "text-tools"
+  },
+  "reviewers": [
+   {
+    "displayName": "Roe, Sam",
+    "uniqueName": "sroe@example.com",
+    "vote": 10,
+    "isRequired": null
+   },
+   {
+    "displayName": "[Project]\\Team",
+    "uniqueName": "vstfs:///Classification/TeamProject/00000000-0000-4000-8000-000000000001\\Team",
+    "vote": 10,
+    "isRequired": true
+   }
+  ]
+ },
+ {
+  "pullRequestId": 183177,
+  "title": "Item #1002: Keep file metadata on update",
+  "description": "Second of three PRs for #1002.\n\n- An update keeps the existing metadata when the request omits it, and clears it when the req",
+  "isDraft": false,
+  "status": "active",
+  "mergeStatus": "succeeded",
+  "creationDate": "2026-10-30T10:30:38.570180+00:00",
+  "sourceRefName": "refs/heads/feature/file-descriptions",
+  "targetRefName": "refs/heads/master",
+  "lastMergeSourceCommit": {
+   "commitId": "e473946851f98e43fdbb00fff3d608b0f6e90328"
+  },
+  "lastMergeTargetCommit": {
+   "commitId": "40f948a141779661f92a8012d1eb4f9134415cbc"
+  },
+  "createdBy": {
+   "displayName": "Smith, Alex",
+   "uniqueName": "asmith@example.com"
+  },
+  "repository": {
+   "id": "00000000-0000-4000-8000-000000000013",
+   "name": "file-service"
+  },
+  "reviewers": [
+   {
+    "displayName": "Lee, Kim",
+    "uniqueName": "klee@example.com",
+    "vote": 0,
+    "isRequired": null
+   },
+   {
+    "displayName": "Roe, Sam",
+    "uniqueName": "sroe@example.com",
+    "vote": 0,
+    "isRequired": null
+   },
+   {
+    "displayName": "[Project]\\Team",
+    "uniqueName": "vstfs:///Classification/TeamProject/00000000-0000-4000-8000-000000000001\\Team",
+    "vote": 0,
+    "isRequired": true
+   }
+  ]
+ },
+ {
+  "pullRequestId": 183294,
+  "title": "#1003 Let the user resize the side panel",
+  "description": "The user can now drag the edge of the side panel to change its width.\n\nThis PR is",
+  "isDraft": false,
+  "status": "active",
+  "mergeStatus": "succeeded",
+  "creationDate": "2026-10-30T16:09:17.385249+00:00",
+  "sourceRefName": "refs/heads/klee/1003-resize-details-panel",
+  "targetRefName": "refs/heads/klee/1000-item-view",
+  "lastMergeSourceCommit": {
+   "commitId": "e4829b0d2d1a5c65361669bd60a8c2ae3effa91d"
+  },
+  "lastMergeTargetCommit": {
+   "commitId": "494db12a61c9790bf5974997f17e7bb95d9aa2ed"
+  },
+  "createdBy": {
+   "displayName": "Lee, Kim",
+   "uniqueName": "klee@example.com"
+  },
+  "repository": {
+   "id": "00000000-0000-4000-8000-000000000014",
+   "name": "web-frontend"
+  },
+  "reviewers": []
+ }
+]

@@ -1,0 +1,11 @@
+[package]
+name = "view"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+forge.workspace = true
+pulldown-cmark.workspace = true
+ratatui.workspace = true
+unicode-width.workspace = true
