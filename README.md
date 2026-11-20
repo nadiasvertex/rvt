@@ -164,3 +164,7 @@ The live test reads `RVT_W`, `RVT_H`, and `RVT_KEYS` to set the screen size and 
 `RVT_REVIEW=gitlab-parser-1402 cargo test live_review -- --ignored --nocapture` runs one real
 review and prints the findings. `RVT_DIAGNOSE=gitlab-parser-1366 cargo test live_diagnose --
 --ignored --nocapture` runs one real CI diagnosis and prints the detail pane.
+
+## License
+
+rvt and ctx are released under the [MIT License](LICENSE).
