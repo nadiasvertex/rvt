@@ -146,6 +146,9 @@ pub struct App {
     pub jobs: HashMap<String, Job>,
     pub diagnoses: HashMap<String, Diagnosis>,
     pub diagnosing: HashMap<String, Job>,
+    /// ADO PRs whose failed build was seen when their details opened. ADO lists PRs without
+    /// builds, so this survives board refreshes until the details load again.
+    ado_ci_failed: HashSet<String>,
     pub posting: HashMap<String, Job>,
     pub discussions: HashMap<String, Vec<Discussion>>,
     discussion_queue: VecDeque<Item>,
@@ -204,6 +207,7 @@ impl App {
             jobs: HashMap::new(),
             diagnoses: HashMap::new(),
             diagnosing: HashMap::new(),
+            ado_ci_failed: HashSet::new(),
             posting: HashMap::new(),
             discussions: HashMap::new(),
             discussion_queue: VecDeque::new(),
@@ -242,6 +246,7 @@ impl App {
         };
         self.items.retain(|i| i.source != source);
         self.items.extend(items);
+        self.apply_ado_ci();
         self.errors.remove(&source);
         self.loading.remove(&source);
         if self.loading.is_empty() {
@@ -353,6 +358,30 @@ impl App {
 
     pub fn set_details(&mut self, key: String, state: DetailState) {
         self.details.insert(key, state);
+    }
+
+    /// Records whether an ADO PR's build failed. A failure shows as CI failed unless the PR is a
+    /// draft or has conflicts, as GitLab does. A passing build leaves the status for the next
+    /// refresh to restore.
+    pub fn ci_loaded(&mut self, key: String, failed: bool) {
+        if failed {
+            self.ado_ci_failed.insert(key);
+            self.apply_ado_ci();
+            self.rebuild_keeping(self.selection_with_group());
+        } else {
+            self.ado_ci_failed.remove(&key);
+        }
+    }
+
+    fn apply_ado_ci(&mut self) {
+        for item in &mut self.items {
+            if item.source == Source::Ado
+                && !matches!(item.status, Status::Draft | Status::Conflicts)
+                && self.ado_ci_failed.contains(&item.key())
+            {
+                item.status = Status::CiFailed;
+            }
+        }
     }
 
     /// Queues a review of `item` and starts it if a slot is free. A review already queued or
@@ -1429,6 +1458,40 @@ mod tests {
             "a second press while the diagnosis runs starts nothing"
         );
         assert_eq!(app.view, View::Details);
+    }
+
+    #[test]
+    fn a_failed_ado_build_seen_in_details_enables_d_and_survives_a_refresh() {
+        let ado = |id| item(Source::Ado, "Core Library", id, "jdoe", 1);
+        let draft = Item {
+            status: Status::Draft,
+            ..ado(21)
+        };
+        let mut app = App::new(vec![ado(20), draft.clone()]);
+        select(&mut app, 20);
+        assert!(diagnosed_ids(&press(&mut app, "d")).is_empty());
+
+        app.ci_loaded(ado(20).key(), true);
+        app.ci_loaded(draft.key(), true);
+        let status = |app: &App, id| app.items.iter().find(|i| i.id == id).unwrap().status;
+        assert_eq!(status(&app, 20), Status::CiFailed);
+        assert_eq!(status(&app, 21), Status::Draft, "a draft stays a draft");
+        assert_eq!(diagnosed_ids(&press(&mut app, "d")), [20]);
+
+        app.set_items(Source::Ado, vec![ado(20), draft.clone()]);
+        assert_eq!(
+            status(&app, 20),
+            Status::CiFailed,
+            "a refresh keeps the failure"
+        );
+
+        app.ci_loaded(ado(20).key(), false);
+        app.set_items(Source::Ado, vec![ado(20), draft]);
+        assert_eq!(
+            status(&app, 20),
+            Status::Active,
+            "a passing build clears it"
+        );
     }
 
     #[test]

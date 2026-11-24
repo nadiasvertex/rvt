@@ -389,31 +389,14 @@ fn replies_due(me: Option<&str>, author: &str, discussions: &[Discussion]) -> us
 
 /// The worst result among a PR's build policies. Required builds decide when there are any.
 fn build_ci(policies: &[ado::PolicyEvaluation]) -> Option<Ci> {
-    let builds: Vec<_> = policies.iter().filter(|p| p.is_build()).collect();
-    let required: Vec<_> = builds
-        .iter()
-        .copied()
-        .filter(|p| p.configuration.is_blocking)
-        .collect();
-    let counted = if required.is_empty() {
-        builds
-    } else {
-        required
-    };
-    counted
-        .iter()
-        .filter_map(|p| {
-            let started = p
-                .context
-                .as_ref()
-                .is_some_and(|c| c.build_id.is_some() && !c.is_expired);
-            match p.status.as_deref()? {
-                "approved" => Some(Ci::Passed),
-                "rejected" | "broken" => Some(Ci::Failed),
-                "running" => Some(Ci::Running),
-                "queued" if started => Some(Ci::Running),
-                _ => None,
-            }
+    ado::counted_builds(policies)
+        .into_iter()
+        .filter_map(|p| match p.status.as_deref()? {
+            "approved" => Some(Ci::Passed),
+            "rejected" | "broken" => Some(Ci::Failed),
+            "running" => Some(Ci::Running),
+            "queued" if p.current_build().is_some() => Some(Ci::Running),
+            _ => None,
         })
         .max_by_key(|ci| match ci {
             Ci::Passed => 0,

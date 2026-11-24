@@ -232,6 +232,14 @@ pub struct Details {
     pub comments: Vec<Comment>,
 }
 
+/// A failed CI job or task, the text of its log, and the reason the forge gives for the failure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FailedJob {
+    pub name: String,
+    pub trace: String,
+    pub reason: Option<String>,
+}
+
 /// A comment thread on a PR or MR, its notes oldest first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Discussion {

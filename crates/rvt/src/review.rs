@@ -577,7 +577,7 @@ new file mode 100644
         let empty = parse_output(r#"{"is_error":false,"result":"I looked around."}"#);
         assert_eq!(
             empty.unwrap_err().to_string(),
-            "claude returned no structured output"
+            "claude returned no structured output (no subtype, ? turns): I looked around."
         );
         let bad = parse_output(
             r#"{"structured_output":{"findings":[{"severity":"urgent","title":"x"}]}}"#,

@@ -36,6 +36,8 @@ enum Msg {
     InputFailed(String),
     Listed(Source, Result<Vec<Item>, String>),
     Details(String, Result<Details, String>),
+    /// Whether an ADO PR's counted builds include a failed one.
+    CiFailed(String, bool),
     Discussions(String, Result<Vec<Discussion>, String>),
     Me(Source, String),
     ReviewProgress(String, String),
@@ -120,6 +122,16 @@ fn execute(cfg: &Arc<Config>, tx: &Sender<Msg>, command: Command) {
             }
         }
         Command::LoadDetails(item) => {
+            // ADO lists PRs without their builds, so they are checked when details open.
+            if item.source == Source::Ado {
+                let (cfg, tx, item) = (Arc::clone(cfg), tx.clone(), item.clone());
+                thread::spawn(move || {
+                    if let Ok(policies) = cfg.ado().and_then(|ado| ado::policies(ado, item.id)) {
+                        let failed = !ado::failed_builds(&policies).is_empty();
+                        let _ = tx.send(Msg::CiFailed(item.key(), failed));
+                    }
+                });
+            }
             let (cfg, tx) = (Arc::clone(cfg), tx.clone());
             thread::spawn(move || {
                 let result = review::details(&cfg, &item);
@@ -219,6 +231,7 @@ fn apply(app: &mut App, msg: Msg) -> Vec<Command> {
         Msg::Listed(source, Err(e)) => app.set_error(source, e),
         Msg::Details(key, Ok(d)) => app.set_details(key, DetailState::Loaded(d)),
         Msg::Details(key, Err(e)) => app.set_details(key, DetailState::Failed(e)),
+        Msg::CiFailed(key, failed) => app.ci_loaded(key, failed),
         Msg::Me(source, me) => {
             app.me.insert(source, me);
             app.rebuild();
@@ -460,14 +473,20 @@ mod tests {
         println!("{}", snapshot(&mut app, 150, 30));
     }
 
-    /// Diagnoses a failed GitLab run and prints the detail pane. Run with
-    /// `RVT_DIAGNOSE=gitlab-parser-1366 cargo test live_diagnose -- --ignored --nocapture`.
+    /// Diagnoses a failed CI run and prints the detail pane. Run with
+    /// `RVT_DIAGNOSE=gitlab-parser-1366 cargo test live_diagnose -- --ignored --nocapture`, or
+    /// with an ADO key such as `ado-mfn-lib-ui-190180`.
     #[test]
     #[ignore = "reads CI logs and runs claude"]
     fn live_diagnose() {
         let cfg = config::load().unwrap();
         let key = std::env::var("RVT_DIAGNOSE").expect("set RVT_DIAGNOSE to an item key");
-        let item = gitlab::list(cfg.gitlab().unwrap())
+        let items = if key.starts_with("ado-") {
+            ado::list(cfg.ado().unwrap(), &cfg.repo_areas)
+        } else {
+            gitlab::list(cfg.gitlab().unwrap())
+        };
+        let item = items
             .unwrap()
             .into_iter()
             .find(|i| i.key() == key)

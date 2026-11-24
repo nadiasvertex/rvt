@@ -9,8 +9,8 @@ use serde_json::json;
 use crate::config::AdoConfig;
 use crate::exec::{run, run_json, with_json_file};
 use crate::model::{
-    Comment, Details, Discussion, DiscussionNote, Item, Source, Status, ThreadStatus, comments_of,
-    login_of,
+    Comment, Details, Discussion, DiscussionNote, FailedJob, Item, Source, Status, ThreadStatus,
+    comments_of, login_of,
 };
 
 const BATCH_SIZE: usize = 200;
@@ -813,6 +813,41 @@ impl PolicyEvaluation {
     pub fn is_build(&self) -> bool {
         self.configuration.kind.display_name == "Build"
     }
+
+    /// The build this evaluation ran, unless it was never started or has expired.
+    pub fn current_build(&self) -> Option<u64> {
+        self.context
+            .as_ref()
+            .filter(|c| !c.is_expired)
+            .and_then(|c| c.build_id)
+    }
+
+    pub fn has_failed(&self) -> bool {
+        matches!(self.status.as_deref(), Some("rejected" | "broken"))
+    }
+}
+
+/// The build policies that decide a PR's CI state: the required ones when there are any,
+/// otherwise all of them.
+pub fn counted_builds(policies: &[PolicyEvaluation]) -> Vec<&PolicyEvaluation> {
+    let builds: Vec<_> = policies.iter().filter(|p| p.is_build()).collect();
+    if builds.iter().any(|p| p.configuration.is_blocking) {
+        builds
+            .into_iter()
+            .filter(|p| p.configuration.is_blocking)
+            .collect()
+    } else {
+        builds
+    }
+}
+
+/// The ids of the failed builds among a PR's counted build policies.
+pub fn failed_builds(policies: &[PolicyEvaluation]) -> Vec<u64> {
+    counted_builds(policies)
+        .into_iter()
+        .filter(|p| p.has_failed())
+        .filter_map(PolicyEvaluation::current_build)
+        .collect()
 }
 
 /// The policy evaluations of a PR, builds among them.
@@ -832,6 +867,138 @@ pub fn policies(ado: &AdoConfig, id: u64) -> Result<Vec<PolicyEvaluation>> {
             "json",
         ],
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct Timeline {
+    #[serde(default)]
+    records: Option<Vec<TimelineRecord>>,
+}
+
+/// One stage, job or task of a build.
+#[derive(Debug, Deserialize)]
+struct TimelineRecord {
+    /// `Stage`, `Phase`, `Job` or `Task`.
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    result: Option<String>,
+    #[serde(default)]
+    log: Option<LogRef>,
+    #[serde(default)]
+    issues: Option<Vec<Issue>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogRef {
+    id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct Issue {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogLines {
+    #[serde(default)]
+    value: Vec<String>,
+}
+
+fn build_resource(ado: &AdoConfig, resource: &str, route: &[String]) -> Result<String> {
+    let mut args = vec![
+        "devops",
+        "invoke",
+        "--area",
+        "build",
+        "--resource",
+        resource,
+        "--route-parameters",
+    ];
+    args.extend(route.iter().map(String::as_str));
+    args.extend(["--organization", &ado.organization, "-o", "json"]);
+    run("az", &args)
+}
+
+/// The failed tasks of each build, with their logs. A build that failed before any task ran,
+/// such as one that found no agent, reports its failed jobs and stages instead.
+pub fn failed_jobs(ado: &AdoConfig, builds: &[u64]) -> Result<Vec<FailedJob>> {
+    let mut found = Vec::new();
+    for build in builds {
+        let route = [
+            format!("project={}", ado.project),
+            format!("buildId={build}"),
+        ];
+        let timeline: Timeline = serde_json::from_str(&build_resource(ado, "timeline", &route)?)
+            .with_context(|| format!("could not read the timeline of build {build}"))?;
+        for record in failed_records(timeline.records.unwrap_or_default()) {
+            let trace = match &record.log {
+                Some(log) => {
+                    let mut route = route.to_vec();
+                    route.push(format!("logId={}", log.id));
+                    let lines: LogLines = serde_json::from_str(&build_resource(
+                        ado, "logs", &route,
+                    )?)
+                    .with_context(|| format!("could not read log {} of build {build}", log.id))?;
+                    lines
+                        .value
+                        .iter()
+                        .map(|l| without_timestamp(l))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+                None => String::new(),
+            };
+            let errors: Vec<_> = record
+                .issues
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|i| i.kind == "error")
+                .map(|i| i.message)
+                .collect();
+            found.push(FailedJob {
+                name: record.name,
+                trace,
+                reason: (!errors.is_empty()).then(|| errors.join("\n")),
+            });
+        }
+    }
+    Ok(found)
+}
+
+fn failed_records(records: Vec<TimelineRecord>) -> Vec<TimelineRecord> {
+    let failed: Vec<_> = records
+        .into_iter()
+        .filter(|r| r.result.as_deref() == Some("failed"))
+        .collect();
+    if failed.iter().any(|r| r.kind == "Task") {
+        failed.into_iter().filter(|r| r.kind == "Task").collect()
+    } else {
+        failed
+            .into_iter()
+            .filter(|r| r.issues.as_ref().is_some_and(|i| !i.is_empty()))
+            .collect()
+    }
+}
+
+/// `2026-11-23T21:46:16.9597879Z text` becomes `text`.
+fn without_timestamp(line: &str) -> &str {
+    match line.split_once(' ') {
+        Some((stamp, rest))
+            if stamp.len() >= 20
+                && stamp.ends_with('Z')
+                && stamp.as_bytes().get(10) == Some(&b'T')
+                && stamp.starts_with(|c: char| c.is_ascii_digit()) =>
+        {
+            rest
+        }
+        _ => line,
+    }
 }
 
 /// PRs in any state whose source branch is `branch`, newest first.
@@ -992,6 +1159,98 @@ pub fn work_item_url(ado: &AdoConfig, id: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build_policy(status: &str, blocking: bool, build: Option<u64>) -> serde_json::Value {
+        json!({
+            "status": status,
+            "configuration": {"isBlocking": blocking, "type": {"displayName": "Build"}},
+            "context": build.map(|id| json!({"buildId": id, "isExpired": false}))
+        })
+    }
+
+    fn evaluations(values: Vec<serde_json::Value>) -> Vec<PolicyEvaluation> {
+        serde_json::from_value(serde_json::Value::Array(values)).unwrap()
+    }
+
+    #[test]
+    fn failed_builds_come_from_required_builds_when_there_are_any() {
+        let reviewers = json!({
+            "status": "rejected",
+            "configuration": {"isBlocking": true, "type": {"displayName": "Minimum number of reviewers"}},
+            "context": null
+        });
+        let policies = evaluations(vec![
+            reviewers,
+            build_policy("rejected", true, Some(1)),
+            build_policy("approved", true, Some(2)),
+            build_policy("rejected", false, Some(3)),
+        ]);
+        assert_eq!(failed_builds(&policies), [1]);
+
+        let optional = evaluations(vec![
+            build_policy("broken", false, Some(4)),
+            build_policy("rejected", false, None),
+        ]);
+        assert_eq!(
+            failed_builds(&optional),
+            [4],
+            "a build that never started has no id"
+        );
+    }
+
+    fn record(kind: &str, name: &str, result: &str, issues: &[&str]) -> serde_json::Value {
+        json!({
+            "type": kind, "name": name, "result": result,
+            "issues": issues.iter().map(|m| json!({"type": "error", "message": m})).collect::<Vec<_>>()
+        })
+    }
+
+    fn names(records: Vec<serde_json::Value>) -> Vec<String> {
+        let records: Vec<TimelineRecord> =
+            serde_json::from_value(serde_json::Value::Array(records)).unwrap();
+        failed_records(records)
+            .into_iter()
+            .map(|r| r.name)
+            .collect()
+    }
+
+    #[test]
+    fn failed_tasks_are_chosen_over_their_jobs_and_stages() {
+        let records = vec![
+            record("Stage", "Build and test", "failed", &[]),
+            record("Job", "Build and test", "failed", &[]),
+            record("Task", "Checkout", "succeeded", &[]),
+            record(
+                "Task",
+                "Build status-dashboard",
+                "failed",
+                &["Bash exited with code '1'."],
+            ),
+        ];
+        assert_eq!(names(records), ["Build status-dashboard"]);
+    }
+
+    #[test]
+    fn a_build_with_no_failed_task_reports_the_records_that_say_why() {
+        let records = vec![
+            record("Stage", "Build", "failed", &[]),
+            record("Job", "Build", "failed", &["No agent found in pool Mac."]),
+        ];
+        assert_eq!(names(records), ["Build"]);
+    }
+
+    #[test]
+    fn log_timestamps_are_removed() {
+        assert_eq!(
+            without_timestamp("2026-11-23T21:46:16.9725572Z ##[error]Bash exited"),
+            "##[error]Bash exited"
+        );
+        assert_eq!(without_timestamp("plain text line"), "plain text line");
+        assert_eq!(
+            without_timestamp("2026-11-23T21:46:16.9Z"),
+            "2026-11-23T21:46:16.9Z"
+        );
+    }
 
     #[test]
     fn work_item_links_split_children_from_prs() {

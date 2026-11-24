@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::config::GitLabConfig;
 use crate::exec::{self, run_json};
 use crate::model::{
-    Details, Discussion, DiscussionNote, Item, Source, Status, ThreadStatus, comments_of,
+    Details, Discussion, DiscussionNote, FailedJob, Item, Source, Status, ThreadStatus, comments_of,
 };
 
 const PAGE_SIZE: usize = 100;
@@ -74,6 +74,9 @@ struct Bridge {
 struct JobInfo {
     id: u64,
     name: String,
+    /// Such as `script_failure`, or `stuck_pending_no_matching_runners` for a job that never ran.
+    #[serde(default)]
+    failure_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -352,13 +355,6 @@ pub fn status_of(mr: &Mr) -> Status {
     }
 }
 
-/// A failed job and the text of its log.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FailedJob {
-    pub name: String,
-    pub trace: String,
-}
-
 /// The failed jobs of an MR's head pipeline. A pipeline that only triggers a child pipeline
 /// has no failed jobs of its own, so its failed children are searched.
 pub fn failed_jobs(cfg: &GitLabConfig, item: &Item) -> Result<Vec<FailedJob>> {
@@ -386,6 +382,7 @@ fn failed_in(cfg: &GitLabConfig, project: u64, pipeline: u64, depth: u8) -> Resu
                 Ok(FailedJob {
                     name: job.name,
                     trace,
+                    reason: job.failure_reason,
                 })
             })
             .collect();
