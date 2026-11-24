@@ -188,9 +188,28 @@ each project's session, every window and pane in it inherits the variable, and t
 `ctx hooks` use it to report to the right project. A `claude` started by hand in any window of
 the session counts, and so does one started with `C`. `C` runs `command` from the `[claude]`
 section, `claude` by default. When `config_dir` is set, ctx sets `CLAUDE_CONFIG_DIR` to it, so a
-shell alias is not needed. The project screen lists recent sessions that Claude kept a
-transcript for. Enter on one goes to its window while it still runs, and otherwise runs
-`claude --resume` in a new window.
+shell alias is not needed.
+
+The project screen lists the project's Claude sessions: running ones first, marked busy or idle,
+then frozen ones, then the five most recent that ended. ctx knows which sessions run from the
+files Claude Code keeps under `sessions/` in its config directory. It reads the directory set by
+`config_dir`, `~/.claude`, and the directory each session ran under. These files are internal to
+Claude Code, so a future version may change them. ctx then shows no sessions as running, and
+Enter falls back to the hook events to find a session's pane.
+
+- Enter on a running session goes to its window. On one that ended, it runs `claude --resume`
+  in a new window.
+- `f` on a session freezes it. ctx asks for a note, marks the session frozen and ends Claude. An
+  idle session in a known pane gets `/exit`, and otherwise, or if `/exit` does not end it, ctx
+  sends SIGTERM. Freezing a busy session interrupts its turn, so it needs `y` to confirm. The
+  frozen session stays in the project until you resume it and does not count toward the five.
+- `t` or Enter on a frozen session resumes it in a new window.
+- `ctx freeze-claude <id or name> [--note T]` freezes a session from a shell.
+
+Freezing a project with "close tmux session" marks the Claude sessions running in it frozen
+before the session closes, so they can be resumed later. The journal records each freeze and
+resume, and also records a frozen session whose transcript is gone, which can no longer be
+resumed.
 
 When Claude works in a linked git worktree, the hooks add the worktree's branch to the project,
 stored against the repository's main checkout. ctx checks at the start of each session and at the

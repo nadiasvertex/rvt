@@ -73,9 +73,32 @@ pub struct ClaudeSession {
     /// `CLAUDE_CONFIG_DIR` of the session, so a resume runs under the same account.
     #[serde(default)]
     pub config_dir: Option<PathBuf>,
+    /// The name Claude showed for the session when ctx last saw it running.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Set while the session is set aside to resume later.
+    #[serde(default)]
+    pub frozen: Option<FrozenSession>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrozenSession {
+    pub at: DateTime<Utc>,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// Sessions kept per project, not counting frozen ones.
+pub const KEEP_SESSIONS: usize = 5;
+
 impl ClaudeSession {
+    /// The session's name when known, and otherwise the start of its ID.
+    pub fn label(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.id.chars().take(8).collect())
+    }
+
     /// Whether Claude kept a transcript of the session. `claude --resume` needs one, and Claude
     /// writes none for a session that ends before the first message, or after it is deleted.
     pub fn resumable(&self) -> bool {
@@ -159,6 +182,35 @@ impl Project {
             .as_ref()
             .and_then(|w| w.cleared.as_ref())
             .map(|c| c.reason.as_str())
+    }
+
+    /// Records a session that started, replacing an earlier record of the same session, which
+    /// thaws it. Drops sessions that can no longer be resumed and the oldest ended sessions
+    /// past the limit; frozen sessions do not count toward it. Returns the frozen sessions
+    /// dropped because their transcript is gone, so the caller can say so.
+    pub fn add_claude_session(
+        &mut self,
+        session: ClaudeSession,
+        resumable: impl Fn(&ClaudeSession) -> bool,
+    ) -> Vec<ClaudeSession> {
+        let (keep, dropped): (Vec<_>, Vec<_>) = std::mem::take(&mut self.claude_sessions)
+            .into_iter()
+            .filter(|s| s.id != session.id)
+            .partition(|s| resumable(s));
+        self.claude_sessions = keep;
+        self.claude_sessions.push(session);
+        let unfrozen = self
+            .claude_sessions
+            .iter()
+            .filter(|s| s.frozen.is_none())
+            .count();
+        let mut excess = unfrozen.saturating_sub(KEEP_SESSIONS);
+        self.claude_sessions.retain(|s| {
+            let drop = excess > 0 && s.frozen.is_none();
+            excess -= usize::from(drop);
+            !drop
+        });
+        dropped.into_iter().filter(|s| s.frozen.is_some()).collect()
     }
 }
 
@@ -661,6 +713,8 @@ mod tests {
             cwd: Some(PathBuf::from(cwd)),
             pane: None,
             config_dir: Some(config.clone()),
+            name: None,
+            frozen: None,
         };
         let here = config.join("projects/-src-core--claude-wt");
         fs::create_dir_all(&here).unwrap();
@@ -672,6 +726,56 @@ mod tests {
         assert!(session("kept", "/src/core/.claude/wt").resumable());
         assert!(session("moved", "/src/core").resumable());
         assert!(!session("empty", "/src/core/.claude/wt").resumable());
+    }
+
+    fn numbered(n: usize, frozen: bool) -> ClaudeSession {
+        ClaudeSession {
+            id: format!("s{n}"),
+            started: Utc::now(),
+            cwd: None,
+            pane: None,
+            config_dir: None,
+            name: None,
+            frozen: frozen.then(|| FrozenSession {
+                at: Utc::now(),
+                note: String::new(),
+            }),
+        }
+    }
+
+    fn ids(project: &Project) -> Vec<&str> {
+        project
+            .claude_sessions
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn frozen_sessions_do_not_count_toward_the_session_limit() {
+        let _home = TempHome::new("session-limit");
+        let mut project = create("Limit", None).unwrap();
+        project.add_claude_session(numbered(0, true), |_| true);
+        for n in 1..=6 {
+            project.add_claude_session(numbered(n, false), |_| true);
+        }
+        assert_eq!(ids(&project), ["s0", "s2", "s3", "s4", "s5", "s6"]);
+    }
+
+    #[test]
+    fn a_restart_replaces_the_frozen_record_and_lost_frozen_sessions_are_returned() {
+        let _home = TempHome::new("session-thaw");
+        let mut project = create("Thaw", None).unwrap();
+        project.add_claude_session(numbered(1, true), |_| true);
+        project.add_claude_session(numbered(2, true), |_| true);
+        project.add_claude_session(numbered(3, false), |_| true);
+        let dropped = project.add_claude_session(numbered(1, false), |s| s.id == "s1");
+        assert_eq!(ids(&project), ["s1"]);
+        assert!(project.claude_sessions[0].frozen.is_none());
+        assert_eq!(
+            dropped.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["s2"]
+        );
     }
 
     #[test]

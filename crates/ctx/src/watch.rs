@@ -177,18 +177,33 @@ pub fn event(kind: &str) -> Result<()> {
     if kind == EventKind::ClaudeStart {
         if let Some(id) = payload.session_id {
             let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+            let mut lost = Vec::new();
             let _ = store::update(&slug, |p| {
-                p.claude_sessions.retain(|s| s.id != id && s.resumable());
-                p.claude_sessions.push(ClaudeSession {
-                    id,
-                    started: Utc::now(),
-                    cwd: payload.cwd,
-                    pane,
-                    config_dir,
-                });
-                let excess = p.claude_sessions.len().saturating_sub(5);
-                p.claude_sessions.drain(..excess);
+                let name = p
+                    .claude_sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .and_then(|s| s.name.clone());
+                lost = p.add_claude_session(
+                    ClaudeSession {
+                        id,
+                        started: Utc::now(),
+                        cwd: payload.cwd,
+                        pane,
+                        config_dir,
+                        name,
+                        frozen: None,
+                    },
+                    ClaudeSession::resumable,
+                );
             });
+            for s in lost {
+                let _ = store::append_journal(
+                    &slug,
+                    &format!("frozen Claude session {} lost", s.label()),
+                    "Its transcript is gone, so it can no longer be resumed.\n",
+                );
+            }
         }
     } else {
         ops::evaluate(&slug);

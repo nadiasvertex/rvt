@@ -5,6 +5,7 @@ mod changes;
 mod config;
 mod inbox;
 mod item;
+mod live;
 mod ops;
 mod refresh;
 mod respond;
@@ -46,6 +47,8 @@ usage:
   ctx freeze [project]    write a handoff and set the project aside
         [--doing T] [--next T] [--waiting T] [--wait CONDITION] [--close | --keep]
   ctx thaw [project]      make a frozen project live
+  ctx freeze-claude <id>  end a Claude session and keep it in the project to resume later
+        [--note T]        <id> is a session ID or its start, or the name Claude shows
   ctx done [project]      hide a finished project (it stays searchable)
   ctx reopen <project>    make a done project live again
   ctx list                projects and their state
@@ -154,6 +157,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             Ok(0)
         }
         Some("freeze") => cmd_freeze(&cfg, args),
+        Some("freeze-claude") => cmd_freeze_claude(&cfg, args),
         Some("thaw") => {
             let slug = project_arg(&mut args)?;
             ops::thaw(&slug)?;
@@ -461,6 +465,48 @@ fn cmd_freeze(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
 }
 
 /// Finds a project item by its label, key, or the number in it, for `ctx wait`.
+fn cmd_freeze_claude(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
+    let note = take_value(&mut args, "--note").unwrap_or_default();
+    let slug = flag_project(&mut args)?;
+    let Some(query) = args.first().cloned() else {
+        bail!("ctx freeze-claude needs a session ID or name");
+    };
+    let project = store::load(&slug)?;
+    let live = live::sessions(&ops::claude_config_dirs(
+        cfg.claude.config_path(),
+        std::slice::from_ref(&project),
+    ));
+    let matches: Vec<&store::ClaudeSession> = project
+        .claude_sessions
+        .iter()
+        .filter(|s| {
+            s.id.starts_with(&query)
+                || s.name.as_deref() == Some(query.as_str())
+                || live.get(&s.id).and_then(|l| l.name.as_deref()) == Some(query.as_str())
+        })
+        .collect();
+    let session = match matches.as_slice() {
+        [one] => (*one).clone(),
+        [] => bail!("{} has no Claude session matching {query}", project.name),
+        _ => bail!(
+            "{query} matches more than one Claude session in {}",
+            project.name
+        ),
+    };
+    let running = live.get(&session.id).cloned();
+    let frozen = ops::mark_claude_frozen(
+        &slug,
+        &session.id,
+        &note,
+        running.as_ref().and_then(|l| l.name.clone()),
+    )?;
+    if let Some(running) = running {
+        ops::end_claude(&running)?;
+    }
+    println!("{} is frozen; ctx open {slug} lists it", frozen.label());
+    Ok(0)
+}
+
 fn resolve_item(project: &store::Project, arg: &str) -> Option<(String, String)> {
     let arg = arg.trim().to_lowercase();
     let digits: String = arg.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -812,6 +858,8 @@ enum Msg {
     /// The step Claude's work on an item's threads has reached.
     Progress(ItemRef, String),
     Posted(String, ItemRef, respond::Outcome),
+    /// A frozen Claude session's process exited, or could not be ended.
+    ClaudeEnded(String, Result<(), String>),
 }
 
 /// Set while another program owns the terminal, so the input thread stops reading keys.
@@ -865,6 +913,7 @@ fn tui(cfg: Config, start: Start) -> Result<i32> {
     let mut app = App::new(current.clone(), popup);
     app.close_default = cfg.tmux.close_on_freeze;
     app.soft_limit = cfg.live.soft_limit;
+    app.claude_config = cfg.claude.config_path();
     app.start_dir = tmux::active_path()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -1106,6 +1155,13 @@ fn event_loop(
                         job.step = step;
                     }
                 }
+                Msg::ClaudeEnded(label, result) => {
+                    match result {
+                        Ok(()) => app.flash(format!("froze {label}; t resumes it")),
+                        Err(e) => app.fail(e),
+                    }
+                    app.reload();
+                }
                 Msg::Posted(slug, item, outcome) => {
                     app.responding.remove(&item.key());
                     posted(app, &slug, &item, &outcome);
@@ -1327,8 +1383,14 @@ fn run_command(
         }
         Command::ResumeClaude(slug, session) => {
             let project = store::load(&slug)?;
-            let running = wait::claude_pane(&store::events(&slug), &session.id)
-                .filter(|pane| tmux::busy_pane_session(pane).is_some());
+            let running = match app.live.get(&session.id) {
+                Some(live) => live.pane.clone(),
+                None if app.live.is_empty() => {
+                    wait::claude_pane(&store::events(&slug), &session.id)
+                        .filter(|pane| tmux::busy_pane_session(pane).is_some())
+                }
+                None => None,
+            };
             if let Some(pane) = running {
                 tmux::select_pane(&pane)?;
                 return run_command(cfg, tx, app, terminal, Command::Switch(slug));
@@ -1352,6 +1414,28 @@ fn run_command(
                 &command,
                 ClaudePlace::NewWindow,
             )?;
+            ops::mark_claude_thawed(&slug, &session.id)?;
+        }
+        Command::FreezeClaude { slug, id, note } => {
+            let live = app.live.get(&id).cloned();
+            let session = ops::mark_claude_frozen(
+                &slug,
+                &id,
+                &note,
+                live.as_ref().and_then(|l| l.name.clone()),
+            )?;
+            let label = session.label();
+            match live {
+                Some(live) => {
+                    app.flash(format!("freezing {label}: ending Claude"));
+                    let tx = tx.clone();
+                    thread::spawn(move || {
+                        let result = ops::end_claude(&live).map_err(|e| format!("{e:#}"));
+                        let _ = tx.send(Msg::ClaudeEnded(label, result));
+                    });
+                }
+                None => app.flash(format!("froze {label}; t resumes it")),
+            }
         }
         Command::NewClaude(slug) => {
             let project = store::load(&slug)?;

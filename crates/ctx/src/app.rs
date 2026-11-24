@@ -11,10 +11,11 @@ use crate::cache::{self, Cache};
 use crate::changes::Change;
 use crate::inbox::{self, Inbox};
 use crate::item::{ItemRef, ItemState};
+use crate::live::{LiveSession, Status};
 use crate::ops::{self, Since};
 use crate::respond::{self, Evaluation};
 use crate::search::{self, Hit};
-use crate::store::{self, ClaudeSession, Handoff, Note, Project, State};
+use crate::store::{self, ClaudeSession, FrozenSession, Handoff, Note, Project, State};
 use crate::wait::{Condition, parse_when};
 
 /// A single-line text field.
@@ -222,6 +223,37 @@ pub struct CaptureForm {
     pub focus: usize,
 }
 
+/// Where a project's Claude session stands, in the order the project screen lists them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SessionState<'a> {
+    Running(&'a LiveSession),
+    Frozen(&'a FrozenSession),
+    Ended,
+}
+
+impl SessionState<'_> {
+    fn rank(self) -> u8 {
+        match self {
+            SessionState::Running(_) => 0,
+            SessionState::Frozen(_) => 1,
+            SessionState::Ended => 2,
+        }
+    }
+}
+
+/// The note asked for when freezing a Claude session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FreezeClaudeForm {
+    pub slug: String,
+    pub id: String,
+    pub label: String,
+    pub note: Input,
+    /// Claude is working, so freezing interrupts the turn.
+    pub busy: bool,
+    /// Enter was pressed on a busy session, and `y` confirms.
+    pub confirm: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Confirm {
     Done(String),
@@ -241,6 +273,7 @@ pub struct ResponseView {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Modal {
     Freeze(FreezeForm),
+    FreezeClaude(FreezeClaudeForm),
     Wait(WaitPicker),
     NewProject(NewProjectForm),
     Assign(AssignPicker),
@@ -301,6 +334,11 @@ pub enum Command {
     },
     Import(String, String),
     ResumeClaude(String, ClaudeSession),
+    FreezeClaude {
+        slug: String,
+        id: String,
+        note: String,
+    },
     NewClaude(String),
     ReadClipboard(String),
     /// Ask Claude to judge the threads that wait on you and draft responses.
@@ -390,6 +428,10 @@ pub struct App {
     pub inbox: Inbox,
     /// The inbox queries are running.
     pub discovering: bool,
+    /// The `config_dir` from the `[claude]` section, whose session registry ctx reads.
+    pub claude_config: Option<PathBuf>,
+    /// Claude sessions running now, by session ID, refreshed with the projects.
+    pub live: HashMap<String, LiveSession>,
     pending_g: bool,
 }
 
@@ -435,6 +477,8 @@ impl App {
             drafts: HashMap::new(),
             inbox: Inbox::default(),
             discovering: false,
+            claude_config: None,
+            live: HashMap::new(),
             pending_g: false,
         }
     }
@@ -447,8 +491,13 @@ impl App {
         if self.clear_met_waits() {
             self.projects = store::list();
         }
+        self.live = crate::live::sessions(&ops::claude_config_dirs(
+            self.claude_config.clone(),
+            &self.projects,
+        ));
         for p in &mut self.projects {
-            p.claude_sessions.retain(|s| s.resumable());
+            p.claude_sessions
+                .retain(|s| s.resumable() || self.live.contains_key(&s.id));
         }
         self.sessions = crate::tmux::sessions().into_iter().collect();
         self.notes = self
@@ -708,13 +757,29 @@ impl App {
             picks.extend(notes.iter().map(|n| Pick::Note(n.path.clone())));
         }
         picks.extend(
-            project
-                .claude_sessions
-                .iter()
-                .rev()
+            self.claude_rows(project)
+                .into_iter()
                 .map(|s| Pick::Claude(s.id.clone())),
         );
         picks
+    }
+
+    pub fn session_state<'a>(&'a self, session: &'a ClaudeSession) -> SessionState<'a> {
+        if let Some(live) = self.live.get(&session.id) {
+            SessionState::Running(live)
+        } else if let Some(frozen) = &session.frozen {
+            SessionState::Frozen(frozen)
+        } else {
+            SessionState::Ended
+        }
+    }
+
+    /// The project's Claude sessions as the project screen lists them: running, then frozen,
+    /// then ended, each newest first.
+    pub fn claude_rows<'a>(&self, project: &'a Project) -> Vec<&'a ClaudeSession> {
+        let mut rows: Vec<&ClaudeSession> = project.claude_sessions.iter().rev().collect();
+        rows.sort_by_key(|s| self.session_state(s).rank());
+        rows
     }
 
     fn clamp(&mut self) {
@@ -1014,16 +1079,57 @@ impl App {
                 return vec![Command::Edit(path.clone())];
             }
             (KeyCode::Enter | KeyCode::Char('o'), Some(Pick::Claude(id))) => {
-                let session = self
-                    .project(slug)
-                    .and_then(|p| p.claude_sessions.iter().find(|s| &s.id == id).cloned());
-                if let Some(session) = session {
+                if let Some(session) = self.claude_session(slug, id) {
                     return vec![Command::ResumeClaude(slug.to_string(), session)];
                 }
             }
+            (KeyCode::Char('t'), Some(Pick::Claude(id)))
+                if self
+                    .claude_session(slug, id)
+                    .is_some_and(|s| s.frozen.is_some()) =>
+            {
+                if let Some(session) = self.claude_session(slug, id) {
+                    return vec![Command::ResumeClaude(slug.to_string(), session)];
+                }
+            }
+            (KeyCode::Char('f'), Some(Pick::Claude(id))) => self.freeze_claude(slug, id),
             _ => return self.project_action(Some(slug.to_string()), key),
         }
         Vec::new()
+    }
+
+    fn claude_session(&self, slug: &str, id: &str) -> Option<ClaudeSession> {
+        self.project(slug)
+            .and_then(|p| p.claude_sessions.iter().find(|s| s.id == id).cloned())
+    }
+
+    fn freeze_claude(&mut self, slug: &str, id: &str) {
+        let Some(session) = self.claude_session(slug, id) else {
+            return;
+        };
+        let state = self.session_state(&session);
+        if matches!(state, SessionState::Frozen(_)) {
+            self.flash(format!(
+                "{} is already frozen; t resumes it",
+                session.label()
+            ));
+            return;
+        }
+        let (busy, label) = match state {
+            SessionState::Running(live) => (
+                live.status != Status::Idle,
+                live.name.clone().unwrap_or_else(|| session.label()),
+            ),
+            _ => (false, session.label()),
+        };
+        self.modal = Some(Modal::FreezeClaude(FreezeClaudeForm {
+            slug: slug.to_string(),
+            id: id.to_string(),
+            label,
+            note: Input::default(),
+            busy,
+            confirm: false,
+        }));
     }
 
     /// Keys while the detail pane fills the screen: scrolling, and leaving.
@@ -1406,6 +1512,7 @@ impl App {
         let (keep, commands) = match modal {
             Modal::Help => (None, Vec::new()),
             Modal::Freeze(form) => self.freeze_key(form, key),
+            Modal::FreezeClaude(form) => freeze_claude_key(form, key),
             Modal::Wait(picker) => self.wait_key(picker, key),
             Modal::NewProject(form) => new_project_key(form, key),
             Modal::Assign(picker) => self.assign_key(picker, key),
@@ -1686,6 +1793,32 @@ impl App {
 
     pub fn last_refresh(&self) -> Option<DateTime<Utc>> {
         self.cache.updated
+    }
+}
+
+fn freeze_claude_key(mut form: FreezeClaudeForm, key: KeyEvent) -> (Option<Modal>, Vec<Command>) {
+    let freeze = |form: FreezeClaudeForm| Command::FreezeClaude {
+        slug: form.slug,
+        id: form.id,
+        note: form.note.text.trim().to_string(),
+    };
+    if form.confirm {
+        return match key.code {
+            KeyCode::Char('y') => (None, vec![freeze(form)]),
+            _ => (None, Vec::new()),
+        };
+    }
+    match key.code {
+        KeyCode::Esc => (None, Vec::new()),
+        KeyCode::Enter if form.busy => {
+            form.confirm = true;
+            (Some(Modal::FreezeClaude(form)), Vec::new())
+        }
+        KeyCode::Enter => (None, vec![freeze(form)]),
+        _ => {
+            form.note.handle(key);
+            (Some(Modal::FreezeClaude(form)), Vec::new())
+        }
     }
 }
 
@@ -2229,6 +2362,115 @@ mod tests {
         assert_eq!(
             app.handle_key(key(KeyCode::Char('C'))),
             [Command::NewClaude("wire".into())]
+        );
+    }
+
+    fn claude_app() -> App {
+        let session = |id: &str, frozen: bool| ClaudeSession {
+            id: id.into(),
+            started: Utc::now(),
+            cwd: None,
+            pane: None,
+            config_dir: None,
+            name: None,
+            frozen: frozen.then(|| FrozenSession {
+                at: Utc::now(),
+                note: String::new(),
+            }),
+        };
+        let mut p = project("wire", State::Live);
+        p.claude_sessions = vec![
+            session("ended", false),
+            session("idle", false),
+            session("busy", false),
+            session("frozen", true),
+            session("newer-ended", false),
+        ];
+        let mut app = App::new(None, true);
+        app.projects = vec![p];
+        for (id, status) in [("idle", Status::Idle), ("busy", Status::Busy)] {
+            app.live.insert(
+                id.into(),
+                LiveSession {
+                    id: id.into(),
+                    pid: 1,
+                    status,
+                    pane: Some("%1".into()),
+                    name: Some(format!("{id}-name")),
+                    file: PathBuf::from("/s/1.json"),
+                },
+            );
+        }
+        app.open_project("wire");
+        app
+    }
+
+    fn select_claude(app: &mut App, id: &str) {
+        app.project_selected = app
+            .picks("wire")
+            .iter()
+            .position(|p| *p == Pick::Claude(id.into()))
+            .expect("the session is listed");
+    }
+
+    #[test]
+    fn claude_sessions_list_running_then_frozen_then_ended_newest_first() {
+        let app = claude_app();
+        let order: Vec<&str> = app
+            .claude_rows(app.project("wire").unwrap())
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(order, ["busy", "idle", "frozen", "newer-ended", "ended"]);
+    }
+
+    #[test]
+    fn f_freezes_an_idle_claude_session_with_its_note() {
+        let mut app = claude_app();
+        select_claude(&mut app, "idle");
+        app.handle_key(key(KeyCode::Char('f')));
+        typed(&mut app, "pick up the parser");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            [Command::FreezeClaude {
+                slug: "wire".into(),
+                id: "idle".into(),
+                note: "pick up the parser".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn freezing_a_busy_claude_session_needs_y() {
+        let mut app = claude_app();
+        select_claude(&mut app, "busy");
+        app.handle_key(key(KeyCode::Char('f')));
+        assert!(app.handle_key(key(KeyCode::Enter)).is_empty());
+        assert!(app.handle_key(key(KeyCode::Char('n'))).is_empty());
+        assert_eq!(app.modal, None);
+
+        app.handle_key(key(KeyCode::Char('f')));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            [Command::FreezeClaude {
+                slug: "wire".into(),
+                id: "busy".into(),
+                note: String::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn t_resumes_a_frozen_claude_session_and_f_does_not_freeze_it_again() {
+        let mut app = claude_app();
+        select_claude(&mut app, "frozen");
+        assert!(app.handle_key(key(KeyCode::Char('f'))).is_empty());
+        assert_eq!(app.modal, None);
+        let commands = app.handle_key(key(KeyCode::Char('t')));
+        assert!(
+            matches!(commands.as_slice(), [Command::ResumeClaude(slug, s)] if slug == "wire" && s.id == "frozen"),
+            "{commands:?}"
         );
     }
 

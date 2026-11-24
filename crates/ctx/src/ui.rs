@@ -12,10 +12,11 @@ use view::text::{fit, rule};
 use view::theme::{ACCENT, DIM, MUTED};
 
 use crate::app::{
-    App, AskKind, AssignPicker, CaptureForm, Confirm, FreezeForm, Group, HomeRow, Input, Job,
-    Modal, Pick, ResponseView, Screen, WaitPicker,
+    App, AskKind, AssignPicker, CaptureForm, Confirm, FreezeClaudeForm, FreezeForm, Group, HomeRow,
+    Input, Job, Modal, Pick, ResponseView, Screen, SessionState, WaitPicker,
 };
 use crate::item::{Ci, ItemRef, ItemState, Tone};
+use crate::live::Status;
 use crate::ops;
 use crate::respond::{Assessment, Evaluation, Response};
 use crate::search::{MATCH_END, MATCH_START};
@@ -164,6 +165,9 @@ fn hint_line(app: &App) -> Line<'static> {
         (Some(Modal::Confirm(_)), _) => " y confirms  any other key cancels",
         (Some(Modal::Wait(p)), _) if p.asking.is_none() => " j k move  ⏎ choose  esc cancel",
         (Some(Modal::Assign(_)), _) => " type to filter  ↑↓ move  ⏎ add  esc cancel",
+        (Some(Modal::FreezeClaude(f)), _) if f.confirm => {
+            " y interrupts Claude and freezes  any other key cancels"
+        }
         (Some(Modal::Freeze(_) | Modal::Capture(_)), _) => {
             " tab next field  space picks or toggles  ⏎ save  esc cancel"
         }
@@ -712,16 +716,40 @@ fn draw_project(frame: &mut Frame, app: &App, slug: &str, area: Rect) {
     }
     if !project.claude_sessions.is_empty() {
         lines.push(Line::raw(""));
-        lines.push(section("Claude sessions", "⏎ resume"));
-        for s in project.claude_sessions.iter().rev() {
+        lines.push(section(
+            "Claude sessions",
+            "⏎ go or resume  f freeze  t thaw",
+        ));
+        for s in app.claude_rows(&project) {
             let is = mark(&lines, &mut pick_index);
             let dir = s.cwd.as_deref().map(tilde).unwrap_or_default();
-            let short: String = s.id.chars().take(8).collect();
+            let (glyph, color, state, label) = match app.session_state(s) {
+                SessionState::Running(live) => {
+                    let (word, color) = match live.status {
+                        Status::Busy | Status::Other => ("busy", Color::Cyan),
+                        Status::Idle => ("idle", Color::Green),
+                    };
+                    let label = live.name.clone().unwrap_or_else(|| s.label());
+                    ("●", color, word.to_string(), label)
+                }
+                SessionState::Frozen(f) => (
+                    "❄",
+                    Color::Blue,
+                    format!("frozen {} ago", age(f.at, Utc::now())),
+                    s.label(),
+                ),
+                SessionState::Ended => (
+                    "▸",
+                    MUTED,
+                    format!("{} ago", ago(Some(s.started))),
+                    s.label(),
+                ),
+            };
             let mut line = Line::from(vec![
                 Span::raw(if is { " > " } else { "   " }),
-                Span::styled("▸ ", Style::new().fg(ACCENT)),
-                Span::raw(format!("{short}  ")),
-                Span::styled(format!("{} ago  {dir}", ago(Some(s.started))), DIM),
+                Span::styled(format!("{glyph} "), Style::new().fg(color)),
+                Span::raw(format!("{}  ", fit(&label, 24))),
+                Span::styled(format!("{state}  {dir}"), DIM),
             ]);
             if is {
                 line = line.style(SELECTED);
@@ -926,12 +954,43 @@ fn detail_lines(
         }
         Some(Pick::Claude(id)) => {
             if let Some(s) = project.claude_sessions.iter().find(|s| &s.id == id) {
-                lines.push(Line::styled("Claude Code session", Style::new().bold()));
+                lines.push(Line::styled(
+                    format!("Claude Code session {}", s.label()),
+                    Style::new().bold(),
+                ));
                 lines.push(Line::styled(s.id.clone(), DIM));
                 lines.push(Line::raw(""));
-                lines.push(Line::raw(
-                    "⏎ goes to its window while it runs, or resumes it in a new one",
-                ));
+                match app.session_state(s) {
+                    SessionState::Running(live) => {
+                        let status = match live.status {
+                            Status::Busy => "working",
+                            Status::Idle => "idle, waiting for you",
+                            Status::Other => "running",
+                        };
+                        lines.push(Line::raw(format!(
+                            "Running, {status}. Process {}.",
+                            live.pid
+                        )));
+                        lines.push(Line::raw(
+                            "⏎ goes to its window. f freezes it: ctx ends Claude and keeps the session to resume later.",
+                        ));
+                    }
+                    SessionState::Frozen(f) => {
+                        let when = f.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
+                        lines.push(Line::raw(format!("Frozen {when}.")));
+                        if !f.note.is_empty() {
+                            lines.push(Line::raw(""));
+                            lines.extend(markdown::render(&f.note, width));
+                            lines.push(Line::raw(""));
+                        }
+                        lines.push(Line::raw("t or ⏎ resumes it in a new window."));
+                    }
+                    SessionState::Ended => {
+                        lines.push(Line::raw(
+                            "Ended. ⏎ resumes it in a new window, and f keeps it here as frozen.",
+                        ));
+                    }
+                }
                 if let Some(cwd) = &s.cwd {
                     lines.push(Line::styled(format!("in {}", tilde(cwd)), DIM));
                 }
@@ -1393,6 +1452,7 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &Modal) {
     let area = frame.area();
     let (title, lines, height): (String, Vec<Line>, u16) = match modal {
         Modal::Freeze(form) => freeze_lines(app, form, area.width.min(90) as usize),
+        Modal::FreezeClaude(form) => freeze_claude_lines(form),
         Modal::Wait(picker) => wait_lines(app, picker),
         Modal::NewProject(form) => {
             let mut lines = vec![
@@ -1471,6 +1531,33 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &Modal) {
     let rect = centered(area, area.width.min(96), height + 2);
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(modal_block(&title)), rect);
+}
+
+fn freeze_claude_lines(form: &FreezeClaudeForm) -> (String, Vec<Line<'static>>, u16) {
+    let mut lines = vec![field("Note", &form.note, !form.confirm, 80), Line::raw("")];
+    let warn = Style::new().fg(Color::Yellow);
+    if form.confirm {
+        lines.push(Line::styled(
+            " Claude is working. Freezing ends it now and loses the current turn. y confirms.",
+            warn,
+        ));
+    } else if form.busy {
+        lines.push(Line::styled(
+            " Claude is working. Freezing interrupts the current turn.",
+            warn,
+        ));
+    } else {
+        lines.push(Line::styled(
+            " ctx ends Claude and keeps the session here. t resumes it later.",
+            DIM,
+        ));
+    }
+    let height = lines.len() as u16 + 2;
+    (
+        format!("Freeze Claude session {}", form.label),
+        lines,
+        height,
+    )
 }
 
 fn freeze_lines(app: &App, form: &FreezeForm, width: usize) -> (String, Vec<Line<'static>>, u16) {
@@ -1684,6 +1771,10 @@ fn help_lines() -> Vec<Line<'static>> {
             "in the responses: p posts the reply, r resolves the thread too, space checks several, C hands plans to Claude",
         ),
         ("e", "edit the next step"),
+        (
+            "f / t",
+            "on a Claude session: freeze it (ends Claude, keeps it to resume) / resume it",
+        ),
         ("s", "switch to this project's tmux session"),
         (
             "C",

@@ -126,6 +126,19 @@ fn is_shell(command: &str) -> bool {
     )
 }
 
+/// The session a pane belongs to, while the pane exists.
+pub fn pane_session(pane: &str) -> Option<String> {
+    tmux(&["display-message", "-p", "-t", pane, "#{session_name}"]).ok()
+}
+
+/// Types the text into the pane after clearing its input line, then presses Enter.
+pub fn type_line(pane: &str, text: &str) -> Result<()> {
+    tmux(&["send-keys", "-t", pane, "C-u"])?;
+    tmux(&["send-keys", "-t", pane, "-l", text])?;
+    tmux(&["send-keys", "-t", pane, "Enter"])?;
+    Ok(())
+}
+
 /// Makes the pane the active pane of its window, and the window the current one of its session.
 pub fn select_pane(pane: &str) -> Result<()> {
     tmux(&["select-window", "-t", pane])?;

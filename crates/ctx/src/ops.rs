@@ -12,8 +12,11 @@ use crate::cache;
 use crate::changes::{self, Change};
 use crate::config::Config;
 use crate::item::{ItemRef, ItemState};
+use crate::live::{self, LiveSession};
 use crate::search;
-use crate::store::{self, Entry, Handoff, MarkKind, Note, Project, State};
+use crate::store::{
+    self, ClaudeSession, Entry, FrozenSession, Handoff, MarkKind, Note, Project, State,
+};
 use crate::tmux;
 use crate::wait::{self, Cleared, Condition, Wait};
 
@@ -186,11 +189,156 @@ pub fn freeze(
         spawn_detached(&["summarize", slug]);
     }
     if close && tmux::has_session(&project.session) {
+        freeze_claudes_in_session(cfg, &project)?;
         if tmux::current_session().as_deref() == Some(project.session.as_str()) {
             tmux::ensure_home_session()?;
             tmux::switch_to(tmux::HOME_SESSION)?;
         }
         tmux::kill_session(&project.session)?;
+    }
+    Ok(())
+}
+
+/// The Claude config directories whose session registries ctx reads.
+pub fn claude_config_dirs(configured: Option<PathBuf>, projects: &[Project]) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = configured.into_iter().collect();
+    dirs.extend(std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from));
+    dirs.extend(dirs::home_dir().map(|h| h.join(".claude")));
+    dirs.extend(
+        projects
+            .iter()
+            .flat_map(|p| &p.claude_sessions)
+            .filter_map(|s| s.config_dir.clone()),
+    );
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+/// The project's Claude sessions that run now, by session ID.
+pub fn live_claudes(cfg: &Config, project: &Project) -> Vec<(ClaudeSession, LiveSession)> {
+    let running = live::sessions(&claude_config_dirs(
+        cfg.claude.config_path(),
+        std::slice::from_ref(project),
+    ));
+    project
+        .claude_sessions
+        .iter()
+        .filter_map(|s| running.get(&s.id).map(|l| (s.clone(), l.clone())))
+        .collect()
+}
+
+/// Marks a Claude session frozen and journals it. Ending its process is `end_claude`.
+pub fn mark_claude_frozen(
+    slug: &str,
+    id: &str,
+    note: &str,
+    name: Option<String>,
+) -> Result<ClaudeSession> {
+    let mut found = None;
+    store::update(slug, |p| {
+        if let Some(s) = p.claude_sessions.iter_mut().find(|s| s.id == id) {
+            s.name = name.or(s.name.take());
+            s.frozen = Some(FrozenSession {
+                at: Utc::now(),
+                note: note.trim().to_string(),
+            });
+            found = Some(s.clone());
+        }
+    })?;
+    let Some(session) = found else {
+        bail!("{slug} has no Claude session {id}");
+    };
+    store::append_journal(
+        slug,
+        &format!("froze Claude session {}", session.label()),
+        &format!(
+            "{}
+",
+            note.trim()
+        ),
+    )?;
+    store::commit(&format!(
+        "Freeze Claude session {} in {slug}",
+        session.label()
+    ));
+    Ok(session)
+}
+
+/// Clears a Claude session's frozen mark, once ctx has started resuming it.
+pub fn mark_claude_thawed(slug: &str, id: &str) -> Result<()> {
+    let mut label = None;
+    store::update(slug, |p| {
+        if let Some(s) = p.claude_sessions.iter_mut().find(|s| s.id == id) {
+            if s.frozen.take().is_some() {
+                label = Some(s.label());
+            }
+        }
+    })?;
+    if let Some(label) = label {
+        store::append_journal(slug, &format!("thawed Claude session {label}"), "")?;
+        store::commit(&format!("Thaw Claude session {label} in {slug}"));
+    }
+    Ok(())
+}
+
+/// How long `end_claude` waits for each way of ending Claude to work.
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ends a running Claude session and waits for it to exit. An idle session in a known pane
+/// gets `/exit`, so it shuts down cleanly and runs its SessionEnd hooks; otherwise, or if that
+/// does not end it, the process gets SIGTERM.
+pub fn end_claude(session: &LiveSession) -> Result<()> {
+    if session.status == live::Status::Idle {
+        if let Some(pane) = &session.pane {
+            if tmux::type_line(pane, "/exit").is_ok() && exited(session, EXIT_WAIT) {
+                return Ok(());
+            }
+        }
+    }
+    Command::new("kill")
+        .args(["-TERM", &session.pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if exited(session, EXIT_WAIT) {
+        return Ok(());
+    }
+    bail!(
+        "Claude session {} (pid {}) did not exit; end it by hand",
+        session.name.as_deref().unwrap_or(&session.id),
+        session.pid
+    )
+}
+
+fn exited(session: &LiveSession, within: std::time::Duration) -> bool {
+    let until = std::time::Instant::now() + within;
+    while std::time::Instant::now() < until {
+        if live::ended(session) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    live::ended(session)
+}
+
+/// Marks the Claude sessions running in the project's tmux session frozen, before the tmux
+/// session closes and ends them, so they can be resumed.
+fn freeze_claudes_in_session(cfg: &Config, project: &Project) -> Result<()> {
+    for (session, running) in live_claudes(cfg, project) {
+        let inside = running
+            .pane
+            .as_deref()
+            .and_then(tmux::pane_session)
+            .is_some_and(|s| s == project.session);
+        if inside {
+            mark_claude_frozen(
+                &project.slug,
+                &session.id,
+                "The project was frozen.",
+                running.name,
+            )?;
+        }
     }
     Ok(())
 }
