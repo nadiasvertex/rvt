@@ -1,0 +1,78 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            packages: --workspace
+            test: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            packages: --workspace
+            test: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            packages: --workspace
+            test: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            packages: --workspace
+            test: false
+          # ctx drives tmux and uses Unix-only process APIs, so Windows builds rvt only.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            packages: --workspace --exclude ctx
+            test: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Test
+        if: matrix.test
+        shell: bash
+        run: cargo test --locked ${{ matrix.packages }}
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.packages }}
+
+      - name: Package
+        shell: bash
+        run: |
+          dir="rvt-${{ matrix.target }}"
+          mkdir "$dir"
+          cp README.md LICENSE "$dir/"
+          for bin in rvt ctx; do
+            for f in "target/${{ matrix.target }}/release/$bin" "target/${{ matrix.target }}/release/$bin.exe"; do
+              [ -f "$f" ] && cp "$f" "$dir/"
+            done
+          done
+          ls -l "$dir"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rvt-${{ matrix.target }}
+          path: rvt-${{ matrix.target }}
+          if-no-files-found: error
