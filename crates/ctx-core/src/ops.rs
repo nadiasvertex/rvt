@@ -22,10 +22,10 @@ use crate::wait::{self, Cleared, Condition, Wait};
 
 /// The project whose workspace this process runs in.
 pub fn current_project(terminals: &dyn Terminals, projects: &[Project]) -> Option<String> {
-    if let Some(session) = terminals.current_workspace() {
+    if let Some(workspace) = terminals.current_workspace() {
         return projects
             .iter()
-            .find(|p| p.session == session)
+            .find(|p| p.workspace == workspace)
             .map(|p| p.slug.clone());
     }
     std::env::var("CTX_PROJECT")
@@ -43,7 +43,7 @@ pub fn resolve(
         Some(name) => store::find(projects, name),
         None => match current_project(terminals, projects) {
             Some(slug) => Ok(slug),
-            None => bail!("not in a project's tmux session, so name the project"),
+            None => bail!("not in a project's terminal, so name the project"),
         },
     }
 }
@@ -103,7 +103,10 @@ pub fn switch(
     }
     let project = store::load(slug)?;
     terminals.open(&project)?;
-    let note = cfg.tmux.switch_message.then(|| switch_message(&project));
+    let note = cfg
+        .workspace
+        .switch_message
+        .then(|| switch_message(&project));
     terminals.show(&project, note.as_deref())
 }
 
@@ -191,7 +194,7 @@ pub fn freeze(
     }
     if close && terminals.is_open(&project) {
         freeze_claudes_in_session(cfg, terminals, &project)?;
-        if terminals.current_workspace().as_deref() == Some(project.session.as_str()) {
+        if terminals.current_workspace().as_deref() == Some(project.workspace.as_str()) {
             terminals.show_home()?;
         }
         terminals.close(&project)?;
@@ -285,13 +288,13 @@ pub fn mark_claude_thawed(slug: &str, id: &str) -> Result<()> {
 /// How long `end_claude` waits for each way of ending Claude to work.
 const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Ends a running Claude session and waits for it to exit. An idle session in a known pane
+/// Ends a running Claude session and waits for it to exit. An idle session in a known terminal
 /// gets `/exit`, so it shuts down cleanly and runs its SessionEnd hooks; otherwise, or if that
 /// does not end it, the process gets SIGTERM.
 pub fn end_claude(terminals: &dyn Terminals, session: &LiveSession) -> Result<()> {
     if session.status == live::Status::Idle {
-        if let Some(pane) = &session.pane {
-            if terminals.type_line(pane, "/exit").is_ok() && exited(session, EXIT_WAIT) {
+        if let Some(terminal) = &session.terminal {
+            if terminals.type_line(terminal, "/exit").is_ok() && exited(session, EXIT_WAIT) {
                 return Ok(());
             }
         }
@@ -331,10 +334,10 @@ fn freeze_claudes_in_session(
 ) -> Result<()> {
     for (session, running) in live_claudes(cfg, project) {
         let inside = running
-            .pane
+            .terminal
             .as_deref()
-            .and_then(|pane| terminals.workspace_of(pane))
-            .is_some_and(|s| s == project.session);
+            .and_then(|terminal| terminals.workspace_of(terminal))
+            .is_some_and(|s| s == project.workspace);
         if inside {
             mark_claude_frozen(
                 &project.slug,
@@ -748,7 +751,7 @@ mod tests {
             slug: slug.into(),
             state,
             created: Utc::now(),
-            session: slug.into(),
+            workspace: slug.into(),
             dir: None,
             next: String::new(),
             handoff: None,

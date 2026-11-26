@@ -6,14 +6,4 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-chrono.workspace = true
 ctx-core.workspace = true
-dirs.workspace = true
-forge.workspace = true
-view.workspace = true
-ratatui.workspace = true
-unicode-width.workspace = true
-
-[dev-dependencies]
-ctx-core = { workspace = true, features = ["testing"] }
-serde_json.workspace = true

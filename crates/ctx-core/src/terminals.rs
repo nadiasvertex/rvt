@@ -1,8 +1,8 @@
 //! The front end that holds each project's terminals. ctx's own logic reaches terminals only
-//! through this trait, so the same logic can run under tmux or another front end.
+//! through this trait, so the same logic runs under the ctx app and the command line.
 //!
-//! A project's workspace is named by `Project::session`. A terminal is named by an opaque ID,
-//! such as a tmux pane ID, and the same IDs are stored in events and Claude session records.
+//! A project's workspace is named by `Project::workspace`. A terminal is named by an opaque ID,
+//! such as `gui:3`, and the same IDs are stored in events and Claude session records.
 
 use anyhow::Result;
 

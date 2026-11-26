@@ -257,14 +257,7 @@ name = "ctx"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "chrono",
  "ctx-core",
- "dirs",
- "forge",
- "ratatui",
- "serde_json",
- "unicode-width",
- "view",
 ]
 
 [[package]]

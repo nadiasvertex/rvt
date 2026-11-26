@@ -22,8 +22,9 @@ pub struct LiveSession {
     pub id: String,
     pub pid: u32,
     pub status: Status,
-    /// The terminal the session runs in: the tmux pane ID, such as `%5`, from Claude's registry.
-    pub pane: Option<String>,
+    /// The terminal the session runs in. Claude's registry names it only under tmux, as a pane
+    /// ID such as `%5`.
+    pub terminal: Option<String>,
     pub name: Option<String>,
     /// The registry file, which Claude removes when it exits normally.
     pub file: PathBuf,
@@ -114,7 +115,7 @@ fn parse(file: &Path, text: &str, started: &HashMap<u32, Started>) -> Option<Liv
         id: record.session_id?,
         pid,
         status,
-        pane: record.tmux.as_deref().and_then(pane_of),
+        terminal: record.tmux.as_deref().and_then(pane_of),
         name: record.name.filter(|n| !n.is_empty()),
         file: file.to_path_buf(),
     })
@@ -222,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn a_running_interactive_session_is_live_with_its_pane_and_status() {
+    fn a_running_interactive_session_is_live_with_its_terminal_and_status() {
         let live = parse(
             Path::new("/s/29054.json"),
             &record("interactive", START, "busy"),
@@ -231,7 +232,7 @@ mod tests {
         .expect("the session runs");
         assert_eq!(live.id, "e7c8");
         assert_eq!(live.status, Status::Busy);
-        assert_eq!(live.pane.as_deref(), Some("%5"));
+        assert_eq!(live.terminal.as_deref(), Some("%5"));
         assert_eq!(live.name.as_deref(), Some("rvt-d6"));
     }
 

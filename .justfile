@@ -6,13 +6,13 @@ build:
 test: check-core
     cargo test
 
-# Fail when ctx-core depends on a terminal UI crate, which belongs in the ctx front end.
+# Fail when ctx-core depends on a UI crate, which belongs in a ctx front end.
 check-core:
     #!/usr/bin/env bash
     set -euo pipefail
-    found=$(cargo tree -p ctx-core -e normal --prefix none | grep -E '^(ratatui|crossterm|view) ' | sort -u || true)
+    found=$(cargo tree -p ctx-core -e normal --prefix none | grep -E '^(ratatui|crossterm|view|gpui|gpui-kit|gpui-component) ' | sort -u || true)
     if [ -n "$found" ]; then
-      echo "ctx-core must not depend on terminal UI crates, but depends on:" >&2
+      echo "ctx-core must not depend on UI crates, but depends on:" >&2
       echo "$found" >&2
       exit 1
     fi

@@ -1,48 +1,24 @@
-mod app;
-mod tmux;
-mod ui;
-
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as Process;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
-use ctx_core::{
-    brief, cache, config, inbox, item, ops, refresh, respond, search, store, wait, watch,
-};
-use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ctx_core::store::{Project, Window};
+use ctx_core::terminals::Terminals;
+use ctx_core::{brief, cache, config, inbox, item, ops, refresh, search, store, wait, watch};
 
-use app::{App, Command, HomeRow, Modal, Screen};
 use config::Config;
 use item::{ItemRef, ParseContext};
-use store::{Handoff, State};
-use tmux::Tmux;
+use store::State;
 
 const USAGE: &str = "ctx: switch between projects without losing your place
 
 usage:
-  ctx                     home screen, or the project screen inside a project's session
-  ctx pick                home screen for the tmux popup; Esc closes it
-  ctx open <project>      project screen
-  ctx new <name>          start a project here and switch to it
-  ctx sw <project>        switch to a project's tmux session
-  ctx freeze [project]    write a handoff and set the project aside
-        [--doing T] [--next T] [--waiting T] [--wait CONDITION] [--close | --keep]
-  ctx thaw [project]      make a frozen project live
-  ctx freeze-claude <id>  end a Claude session and keep it in the project to resume later
-        [--note T]        <id> is a session ID or its start, or the name Claude shows
   ctx done [project]      hide a finished project (it stays searchable)
   ctx reopen <project>    make a done project live again
   ctx list                projects and their state
-  ctx wait <condition>    set a wait condition without freezing; --clear removes it
+  ctx wait <condition>    set a wait condition; --clear removes it
         claude | cmd [label] | review <item> | closed <item> | ci <item>
         state <item> <state> | until <30m|2h|3d|thu|2026-11-20> | <free text>
   ctx note [title]        write a note in $EDITOR
@@ -56,15 +32,59 @@ usage:
   ctx import <link|words> summarize a Teams thread or email into a note, through Claude
   ctx search <words>      search notes, handoffs and items [--all]
   ctx run -- <command>    run a command and wait on it [--no-wait]
-  ctx status              summary for the tmux status line
-  ctx watch               refresh items and clear wait conditions [--daemon] [--once]
   ctx refresh [project]   fetch items now
   ctx reindex             rebuild the search index
-  ctx tmux-config         print the tmux bindings [--write]
   ctx hooks               print the Claude Code hooks that report to ctx
   ctx skill               print the Claude skill that runs ctx update [--write]
+  ctx summarize <project> ask Claude for a summary of the project's last handoff
+  ctx brief <project>     ask Claude for a brief on picking the project back up
 
-Most commands take --project <name>; inside a project's session they default to it.";
+The ctx app, which ctx with no arguments will open, is not built yet.
+Most commands take --project <name>; in a terminal of the ctx app they default to its project.";
+
+/// The front end for commands run from a shell. It has no workspaces of its own and refuses
+/// what only the ctx app can do. It reads the terminal it runs in from `CTX_TERMINAL`, which the
+/// app sets in its terminals. `ops::current_project` reads `CTX_PROJECT` itself.
+struct Cli;
+
+impl Terminals for Cli {
+    fn current_workspace(&self) -> Option<String> {
+        None
+    }
+    fn current_terminal(&self) -> Option<String> {
+        std::env::var("CTX_TERMINAL").ok().filter(|s| !s.is_empty())
+    }
+    fn is_open(&self, _: &Project) -> bool {
+        false
+    }
+    fn open(&self, _: &Project) -> Result<()> {
+        bail!("opening a project needs the ctx app")
+    }
+    fn show(&self, _: &Project, _: Option<&str>) -> Result<()> {
+        bail!("showing a project needs the ctx app")
+    }
+    fn show_home(&self) -> Result<()> {
+        bail!("showing home needs the ctx app")
+    }
+    fn close(&self, _: &Project) -> Result<()> {
+        bail!("closing a project needs the ctx app")
+    }
+    fn layout(&self, _: &Project) -> Option<Vec<Window>> {
+        None
+    }
+    fn message(&self, text: &str) {
+        eprintln!("{text}");
+    }
+    fn type_line(&self, _: &str, _: &str) -> Result<()> {
+        bail!("typing into a terminal needs the ctx app")
+    }
+    fn workspace_of(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn running(&self) -> bool {
+        false
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -102,14 +122,14 @@ fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
 fn project_arg(args: &mut Vec<String>) -> Result<String> {
     let projects = store::list();
     let name = take_value(args, "--project").or_else(|| (!args.is_empty()).then(|| args.join(" ")));
-    ops::resolve(&Tmux, &projects, name.as_deref())
+    ops::resolve(&Cli, &projects, name.as_deref())
 }
 
 /// The project named by `--project`, or the current one.
 fn flag_project(args: &mut Vec<String>) -> Result<String> {
     let projects = store::list();
     let name = take_value(args, "--project");
-    ops::resolve(&Tmux, &projects, name.as_deref())
+    ops::resolve(&Cli, &projects, name.as_deref())
 }
 
 fn run(mut args: Vec<String>) -> Result<i32> {
@@ -124,39 +144,14 @@ fn run(mut args: Vec<String>) -> Result<i32> {
     }
     if command.as_deref() == Some("event") {
         // Hooks must never fail Claude, whatever the config says.
-        let _ = watch::event(&Tmux, args.first().map(String::as_str).unwrap_or_default());
-        return Ok(0);
-    }
-    if command.as_deref() == Some("status") {
-        println!("{}", watch::status_line());
+        let _ = watch::event(&Cli, args.first().map(String::as_str).unwrap_or_default());
         return Ok(0);
     }
     let cfg = config::load()?;
     match command.as_deref() {
-        None => tui(cfg, Start::Default),
-        Some("pick") => tui(cfg, Start::Popup),
-        Some("open") => {
-            let slug = store::find(&store::list(), &args.join(" "))?;
-            tui(cfg, Start::Open(slug))
-        }
-        Some("new") => cmd_new(&cfg, args),
-        Some("sw" | "switch") => {
-            let projects = store::list();
-            let slug = store::find(&projects, &args.join(" "))?;
-            ops::switch(
-                &cfg,
-                &Tmux,
-                &slug,
-                ops::current_project(&Tmux, &projects).as_deref(),
-            )?;
-            Ok(0)
-        }
-        Some("freeze") => cmd_freeze(&cfg, args),
-        Some("freeze-claude") => cmd_freeze_claude(&cfg, args),
-        Some("thaw") => {
-            let slug = project_arg(&mut args)?;
-            ops::thaw(&slug)?;
-            println!("{slug} is live");
+        None => {
+            // Step 3 of the GUI plan opens the ctx app here.
+            println!("{USAGE}");
             Ok(0)
         }
         Some("done") => {
@@ -209,7 +204,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             let scope = if all {
                 None
             } else {
-                ops::current_project(&Tmux, &projects)
+                ops::current_project(&Cli, &projects)
             };
             for hit in search::search(&args.join(" "), scope.as_deref(), 50)? {
                 let snippet = hit
@@ -227,13 +222,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             if args.first().map(String::as_str) == Some("--") {
                 args.remove(0);
             }
-            watch::run_command(&Tmux, &args, set_wait)
-        }
-        Some("watch") => {
-            let daemon = take_flag(&mut args, "--daemon");
-            let once = take_flag(&mut args, "--once");
-            watch::run(&cfg, &Tmux, daemon, once)?;
-            Ok(0)
+            watch::run_command(&Cli, &args, set_wait)
         }
         Some("refresh") => {
             let projects = store::list();
@@ -260,7 +249,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                 eprintln!("failed: {key}: {e}");
             }
             for p in store::list() {
-                ops::evaluate(&Tmux, &p.slug);
+                ops::evaluate(&Cli, &p.slug);
             }
             Ok(0)
         }
@@ -269,26 +258,11 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             println!("indexed {n} projects");
             Ok(0)
         }
-        Some("tmux-config") => {
-            let snippet = tmux::config_snippet();
-            if take_flag(&mut args, "--write") {
-                let path = config::config_dir().join("tmux.conf");
-                store::write_atomic(&path, snippet.as_bytes())?;
-                println!(
-                    "wrote {}\nadd this line to ~/.tmux.conf, then run tmux source-file ~/.tmux.conf:\n  source-file {}",
-                    path.display(),
-                    path.display()
-                );
-            } else {
-                print!("{snippet}");
-            }
-            Ok(0)
-        }
         Some("hooks") => {
             println!(
                 "# Merge this into the settings.json of each Claude config directory you use,\n\
                  # for example ~/.claude/settings.json or ~/.claude-work/settings.json.\n\
-                 # The hooks do nothing outside a ctx project session."
+                 # The hooks do nothing outside a terminal of the ctx app."
             );
             println!("{}", watch::hooks_snippet());
             Ok(0)
@@ -306,36 +280,6 @@ fn run(mut args: Vec<String>) -> Result<i32> {
         }
         Some(other) => bail!("unknown command {other}; ctx --help lists them"),
     }
-}
-
-fn cmd_new(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
-    let stay = take_flag(&mut args, "--no-switch");
-    let name = args.join(" ");
-    if name.trim().is_empty() {
-        bail!("usage: ctx new <name>");
-    }
-    let cwd = std::env::current_dir()?;
-    let project = ops::create(&name, &cwd)?;
-    println!(
-        "created {} in {}",
-        project.slug,
-        project.dir.as_deref().unwrap_or(&cwd).display()
-    );
-    for item in project.refs() {
-        println!("  {} {}", item.kind_label(), item.label());
-    }
-    let items: Vec<ItemRef> = project.refs().cloned().collect();
-    refresh::fetch(cfg, &items, &|_| {});
-    if !stay && tmux::available() {
-        let projects = store::list();
-        ops::switch(
-            cfg,
-            &Tmux,
-            &project.slug,
-            ops::current_project(&Tmux, &projects).as_deref(),
-        )?;
-    }
-    Ok(0)
 }
 
 /// Prompts on the terminal, showing the current value; Enter keeps it.
@@ -397,94 +341,10 @@ fn open_tty() -> Result<Tty> {
     })
 }
 
-fn cmd_freeze(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
-    let doing = take_value(&mut args, "--doing");
-    let next = take_value(&mut args, "--next");
-    let waiting = take_value(&mut args, "--waiting");
-    let wait_arg = take_value(&mut args, "--wait");
-    let close = if take_flag(&mut args, "--close") {
-        true
-    } else if take_flag(&mut args, "--keep") {
-        false
-    } else {
-        cfg.tmux.close_on_freeze
-    };
-    let slug = project_arg(&mut args)?;
-    let project = store::load(&slug)?;
-    let previous = project.handoff.clone();
-    let prev =
-        |f: fn(&Handoff) -> &String| previous.as_ref().map(|h| f(h).clone()).unwrap_or_default();
-    let interactive = doing.is_none() && next.is_none() && waiting.is_none() && wait_arg.is_none();
-    let (doing, next, waiting) = if interactive {
-        let mut tty = open_tty()?;
-        writeln!(
-            tty,
-            "Freezing {}. Enter keeps the value in brackets.",
-            project.name
-        )?;
-        let doing = prompt(&mut tty, "Doing", &prev(|h| &h.doing))?;
-        let next = prompt(&mut tty, "Next", &project.next)?;
-        let waiting = prompt(&mut tty, "Waiting on", &prev(|h| &h.waiting))?;
-        (doing, next, waiting)
-    } else {
-        (
-            doing.unwrap_or_else(|| prev(|h| &h.doing)),
-            next.unwrap_or_else(|| project.next.clone()),
-            waiting.unwrap_or_else(|| prev(|h| &h.waiting)),
-        )
-    };
-    let condition = match wait_arg {
-        Some(text) => {
-            let words: Vec<String> = text.split_whitespace().map(str::to_string).collect();
-            Some(
-                wait::parse_shell(&words, |arg| ops::find_item(&project, arg))
-                    .map_err(anyhow::Error::msg)?
-                    .starting_now(&cache::load().items),
-            )
-        }
-        None => match project.wait.as_ref().filter(|w| w.is_waiting()) {
-            Some(w) => Some(w.condition.clone()),
-            None => (!waiting.trim().is_empty()).then(|| wait::Condition::Manual {
-                text: waiting.trim().to_string(),
-            }),
-        },
-    };
-    let handoff = Handoff {
-        time: Utc::now(),
-        doing,
-        next,
-        waiting,
-    };
-    ops::freeze(cfg, &Tmux, &slug, handoff, condition, close)?;
-    println!("{slug} is frozen");
-    Ok(0)
-}
-
-fn cmd_freeze_claude(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
-    let note = take_value(&mut args, "--note").unwrap_or_default();
-    let slug = flag_project(&mut args)?;
-    let Some(query) = args.first().cloned() else {
-        bail!("ctx freeze-claude needs a session ID or name");
-    };
-    let project = store::load(&slug)?;
-    let (session, running) = ops::find_claude(cfg, &project, &query)?;
-    let frozen = ops::mark_claude_frozen(
-        &slug,
-        &session.id,
-        &note,
-        running.as_ref().and_then(|l| l.name.clone()),
-    )?;
-    if let Some(running) = running {
-        ops::end_claude(&Tmux, &running)?;
-    }
-    println!("{} is frozen; ctx open {slug} lists it", frozen.label());
-    Ok(0)
-}
-
 fn cmd_wait(mut args: Vec<String>) -> Result<i32> {
     let slug = flag_project(&mut args)?;
     if take_flag(&mut args, "--clear") {
-        ops::set_wait(&Tmux, &slug, None)?;
+        ops::set_wait(&Cli, &slug, None)?;
         println!("{slug} no longer waits");
         return Ok(0);
     }
@@ -492,20 +352,20 @@ fn cmd_wait(mut args: Vec<String>) -> Result<i32> {
     let mut condition = wait::parse_shell(&args, |arg| ops::find_item(&project, arg))
         .map_err(anyhow::Error::msg)?;
     condition = condition.starting_now(&cache::load().items);
-    if let wait::Condition::Claude { pane } = &mut condition {
-        *pane = std::env::var("TMUX_PANE")
-            .ok()
+    if let wait::Condition::Claude { terminal } = &mut condition {
+        *terminal = Cli
+            .current_terminal()
             .filter(|_| !take_flag(&mut args, "--any"));
     }
     let described = condition.describe();
-    ops::set_wait(&Tmux, &slug, Some(condition))?;
+    ops::set_wait(&Cli, &slug, Some(condition))?;
     println!("{slug} waits on {described}");
     Ok(0)
 }
 
 fn cmd_list() -> Result<i32> {
     let projects = store::list();
-    let current = ops::current_project(&Tmux, &projects);
+    let current = ops::current_project(&Cli, &projects);
     for state in [State::Live, State::Frozen, State::Done] {
         let group: Vec<_> = projects.iter().filter(|p| p.state == state).collect();
         if group.is_empty() {
@@ -701,7 +561,7 @@ fn cmd_update(cfg: &Config, args: Vec<String>) -> Result<i32> {
                 if !unknown.is_empty() {
                     refresh::fetch(cfg, &unknown, &|_| {});
                 }
-                let current = ops::current_project(&Tmux, &projects);
+                let current = ops::current_project(&Cli, &projects);
                 found =
                     ops::projects_for(&projects, &items, &cache::load().items, current.as_deref());
             }
@@ -770,736 +630,6 @@ fn edit(path: &Path) -> Result<()> {
     Ok(())
 }
 
-enum Start {
-    Default,
-    Popup,
-    Open(String),
-}
-
-enum Msg {
-    Input(Event),
-    InputFailed(String),
-    Fetched(String),
-    InboxDone,
-    Imported(Result<String, String>),
-    Evaluated(ItemRef, Result<usize, String>),
-    /// The step Claude's work on an item's threads has reached.
-    Progress(ItemRef, String),
-    Posted(String, ItemRef, respond::Outcome),
-    /// A frozen Claude session's process exited, or could not be ended.
-    ClaudeEnded(String, Result<(), String>),
-}
-
-/// Set while another program owns the terminal, so the input thread stops reading keys.
-static PAUSED: AtomicBool = AtomicBool::new(false);
-
-fn spawn_input(tx: &Sender<Msg>) {
-    let tx = tx.clone();
-    thread::spawn(move || {
-        loop {
-            if PAUSED.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(30));
-                continue;
-            }
-            let msg = match event::poll(Duration::from_millis(50)) {
-                Ok(false) => continue,
-                Ok(true) if PAUSED.load(Ordering::SeqCst) => continue,
-                Ok(true) => match event::read() {
-                    Ok(e) => Msg::Input(e),
-                    Err(e) => Msg::InputFailed(e.to_string()),
-                },
-                Err(e) => Msg::InputFailed(e.to_string()),
-            };
-            let failed = matches!(msg, Msg::InputFailed(_));
-            if tx.send(msg).is_err() || failed {
-                break;
-            }
-        }
-    });
-}
-
-/// Hands the terminal to another program and takes it back afterwards.
-fn suspended<R>(terminal: &mut DefaultTerminal, f: impl FnOnce() -> R) -> R {
-    PAUSED.store(true, Ordering::SeqCst);
-    thread::sleep(Duration::from_millis(80));
-    ratatui::restore();
-    let result = f();
-    *terminal = ratatui::init();
-    let _ = terminal.clear();
-    PAUSED.store(false, Ordering::SeqCst);
-    result
-}
-
-const TICK: Duration = Duration::from_millis(100);
-const RELOAD: Duration = Duration::from_secs(2);
-
-fn tui(cfg: Config, start: Start) -> Result<i32> {
-    let cfg = Arc::new(cfg);
-    let projects = store::list();
-    let current = ops::current_project(&Tmux, &projects);
-    let popup = matches!(start, Start::Popup);
-    let mut app = App::new(current.clone(), popup);
-    app.close_default = cfg.tmux.close_on_freeze;
-    app.soft_limit = cfg.live.soft_limit;
-    app.claude_config = cfg.claude.config_path();
-    app.start_dir = tmux::active_path()
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    if popup {
-        app.pane = tmux::active_pane()
-            .filter(|p| std::env::var("TMUX_PANE").ok().as_deref() != Some(p.as_str()));
-    }
-    app.reload();
-    match start {
-        Start::Open(slug) => {
-            app.own = Some(slug.clone());
-            app.open_project(&slug);
-        }
-        Start::Default => {
-            if let Some(slug) = current.clone() {
-                app.own = Some(slug.clone());
-                app.open_project(&slug);
-            }
-        }
-        Start::Popup => {
-            if let Some(i) = current.as_ref().and_then(|c| {
-                app.home_order()
-                    .iter()
-                    .position(|r| *r == HomeRow::Project(c.clone()))
-            }) {
-                app.home_selected = i;
-            }
-        }
-    }
-    let (tx, rx) = mpsc::channel();
-    let max_age = (cfg.watch.interval_minutes.max(1) * 60) as i64;
-    let first = match &app.screen {
-        Screen::Project(slug) => refresh::wanted(&app.projects, Some(slug)),
-        _ => refresh::wanted(&app.projects, None),
-    };
-    let age_limit = if watch::running().is_some() {
-        i64::MAX
-    } else {
-        max_age
-    };
-    let stale = refresh::stale(first, &app.cache, age_limit);
-    if !stale.is_empty() {
-        start_refresh(&cfg, &tx, &mut app, stale);
-    }
-    let inbox_stale = app
-        .inbox
-        .updated
-        .is_none_or(|t| (Utc::now() - t).num_seconds() > age_limit);
-    if inbox_stale {
-        start_inbox(&cfg, &tx, &mut app);
-    }
-    let mut terminal = ratatui::init();
-    spawn_input(&tx);
-    let result = event_loop(&cfg, &tx, &rx, &mut app, &mut terminal);
-    ratatui::restore();
-    forge::exec::kill_children();
-    if let Some(slug) = app_attach(&app) {
-        ops::switch(&cfg, &Tmux, &slug, None)?;
-    }
-    result.map(|_| 0)
-}
-
-/// Outside tmux, choosing a project quits the TUI and attaches to the project's session.
-fn app_attach(app: &App) -> Option<String> {
-    ATTACH
-        .lock()
-        .ok()
-        .and_then(|mut a| a.take())
-        .filter(|_| app.quit)
-}
-
-static ATTACH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-/// A shell command that runs Claude, under the configured Claude config directory when there
-/// is one.
-fn claude_command(program: &str, config_dir: Option<&Path>, args: &str) -> String {
-    let mut command = program.trim().to_string();
-    if !args.is_empty() {
-        command = format!("{command} {args}");
-    }
-    match config_dir {
-        Some(dir) => format!(
-            "CLAUDE_CONFIG_DIR={} CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 {command}",
-            tmux::quote(&dir.to_string_lossy())
-        ),
-        None => command,
-    }
-}
-
-/// Where a Claude command runs in the project's session.
-#[derive(Clone, Copy, PartialEq)]
-enum ClaudePlace {
-    NewWindow,
-    /// A new pane beside the current window's panes, unless the session already runs Claude,
-    /// in which case a new window.
-    SplitUnlessRunning,
-}
-
-/// Runs a Claude command in the project's session and moves there. Outside tmux it runs in
-/// this terminal instead.
-fn claude_window(
-    cfg: &Arc<Config>,
-    app: &mut App,
-    terminal: &mut DefaultTerminal,
-    project: &store::Project,
-    dir: &Path,
-    command: &str,
-    place: ClaudePlace,
-) -> Result<()> {
-    if !tmux::inside() {
-        suspended(terminal, || {
-            Process::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(dir)
-                .status()
-        })?;
-        return Ok(());
-    }
-    tmux::ensure_session(project)?;
-    if place == ClaudePlace::SplitUnlessRunning && !tmux::has_claude(&project.session) {
-        tmux::split_window(&project.session, dir, command)?;
-    } else {
-        tmux::new_window(&project.session, dir, "claude", command)?;
-    }
-    if app.current.as_deref() != Some(project.slug.as_str()) {
-        ops::switch(cfg, &Tmux, &project.slug, app.current.as_deref())?;
-        app.switched(&project.slug);
-    }
-    Ok(())
-}
-
-fn start_refresh(cfg: &Arc<Config>, tx: &Sender<Msg>, app: &mut App, items: Vec<ItemRef>) {
-    let fresh: Vec<ItemRef> = items
-        .into_iter()
-        .filter(|i| !app.fetching.contains(&i.key()))
-        .collect();
-    if fresh.is_empty() {
-        return;
-    }
-    app.fetching.extend(fresh.iter().map(ItemRef::key));
-    let (cfg, tx) = (Arc::clone(cfg), tx.clone());
-    thread::spawn(move || {
-        let tx = std::sync::Mutex::new(tx);
-        refresh::fetch(&cfg, &fresh, &|key| {
-            if let Ok(tx) = tx.lock() {
-                let _ = tx.send(Msg::Fetched(key.to_string()));
-            }
-        });
-    });
-}
-
-/// Looks for your PRs, MRs and work items in the background, and fetches the unfiled ones.
-fn start_inbox(cfg: &Arc<Config>, tx: &Sender<Msg>, app: &mut App) {
-    if app.discovering {
-        return;
-    }
-    app.discovering = true;
-    let max_age = (cfg.watch.interval_minutes.max(1) * 60) as i64;
-    let (cfg, tx) = (Arc::clone(cfg), tx.clone());
-    thread::spawn(move || {
-        inbox::refresh(&cfg, max_age);
-        let _ = tx.send(Msg::InboxDone);
-    });
-}
-
-fn event_loop(
-    cfg: &Arc<Config>,
-    tx: &Sender<Msg>,
-    rx: &Receiver<Msg>,
-    app: &mut App,
-    terminal: &mut DefaultTerminal,
-) -> Result<()> {
-    let mut tick = 0usize;
-    let mut last_reload = Instant::now();
-    let mut dirty = true;
-    loop {
-        if dirty {
-            terminal.draw(|frame| ui::draw(frame, app, tick))?;
-            dirty = false;
-        }
-        let wait = if app.animating() {
-            TICK
-        } else {
-            Duration::from_millis(500)
-        };
-        let mut next = match rx.recv_timeout(wait) {
-            Ok(msg) => Some(msg),
-            Err(RecvTimeoutError::Timeout) => {
-                tick = tick.wrapping_add(1);
-                dirty = app.animating() || app.flash.is_some();
-                None
-            }
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
-        };
-        while let Some(msg) = next {
-            match msg {
-                Msg::Input(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                    for command in app.handle_key(key) {
-                        execute(cfg, tx, app, terminal, command);
-                    }
-                }
-                Msg::Input(_) => {}
-                Msg::InputFailed(e) => bail!(e),
-                Msg::Fetched(key) => {
-                    app.fetching.remove(&key);
-                    app.reload_cache();
-                }
-                Msg::InboxDone => {
-                    app.discovering = false;
-                    app.reload();
-                    if let Some(e) = app.inbox.errors.first().cloned() {
-                        app.fail(format!("could not list your items: {e}"));
-                    }
-                }
-                Msg::Imported(Ok(title)) => {
-                    app.flash(format!("imported \"{title}\""));
-                    app.reload();
-                }
-                Msg::Imported(Err(e)) => app.fail(e),
-                Msg::Evaluated(item, result) => {
-                    app.responding.remove(&item.key());
-                    match result {
-                        Ok(n) => app.flash(format!(
-                            "Claude is done: {} ready for {}; r opens {}",
-                            count(n, "response", "responses"),
-                            item.label(),
-                            if n == 1 { "it" } else { "them" }
-                        )),
-                        Err(e) => {
-                            app.respond_failures.insert(item.key(), e.clone());
-                            app.fail(format!("Claude could not answer {}: {e}", item.label()));
-                        }
-                    }
-                    app.reload();
-                }
-                Msg::Progress(item, step) => {
-                    if let Some(job) = app.responding.get_mut(&item.key()) {
-                        job.step = step;
-                    }
-                }
-                Msg::ClaudeEnded(label, result) => {
-                    match result {
-                        Ok(()) => app.flash(format!("froze {label}; t resumes it")),
-                        Err(e) => app.fail(e),
-                    }
-                    app.reload();
-                }
-                Msg::Posted(slug, item, outcome) => {
-                    app.responding.remove(&item.key());
-                    posted(app, &slug, &item, &outcome);
-                    start_refresh(cfg, tx, app, vec![item]);
-                    app.reload();
-                }
-            }
-            dirty = true;
-            next = rx.try_recv().ok();
-        }
-        if last_reload.elapsed() >= RELOAD {
-            app.reload();
-            last_reload = Instant::now();
-            dirty = true;
-        }
-        if app.quit {
-            return Ok(());
-        }
-    }
-}
-
-fn count(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
-
-/// Records which replies reached their threads and says how the post went.
-fn posted(app: &mut App, slug: &str, item: &ItemRef, outcome: &respond::Outcome) {
-    let Some(mut evaluation) = respond::load(slug, item) else {
-        app.fail(format!("the responses to {} are gone", item.label()));
-        return;
-    };
-    let summary = respond::record_posts(&mut evaluation, outcome);
-    let done = post_summary(&summary, item);
-    if let Err(e) = respond::save(slug, &evaluation) {
-        app.fail(format!("{done}, but could not record it: {e:#}"));
-        return;
-    }
-    match summary.error {
-        Some(e) => app.fail(format!("{done}; {e}")),
-        None => app.flash(done),
-    }
-}
-
-/// What posting did, such as "posted 2 replies and resolved 1 thread on PR 7".
-fn post_summary(summary: &respond::PostSummary, item: &ItemRef) -> String {
-    let mut parts = Vec::new();
-    if summary.replied > 0 {
-        parts.push(format!(
-            "posted {}",
-            count(summary.replied, "reply", "replies")
-        ));
-    }
-    if summary.resolved > 0 {
-        parts.push(format!(
-            "resolved {}",
-            count(summary.resolved, "thread", "threads")
-        ));
-    }
-    if parts.is_empty() {
-        return format!("nothing reached {}", item.label());
-    }
-    format!("{} on {}", parts.join(" and "), item.label())
-}
-
-fn execute(
-    cfg: &Arc<Config>,
-    tx: &Sender<Msg>,
-    app: &mut App,
-    terminal: &mut DefaultTerminal,
-    command: Command,
-) {
-    let result = run_command(cfg, tx, app, terminal, command);
-    if let Err(e) = result {
-        app.fail(format!("{e:#}"));
-    }
-    app.reload();
-}
-
-fn run_command(
-    cfg: &Arc<Config>,
-    tx: &Sender<Msg>,
-    app: &mut App,
-    terminal: &mut DefaultTerminal,
-    command: Command,
-) -> Result<()> {
-    match command {
-        Command::Refresh(items) => start_refresh(cfg, tx, app, items),
-        Command::RefreshInbox => start_inbox(cfg, tx, app),
-        Command::Switch(slug) => {
-            if !tmux::inside() {
-                if let Ok(mut a) = ATTACH.lock() {
-                    *a = Some(slug);
-                }
-                app.quit = true;
-                return Ok(());
-            }
-            ops::switch(cfg, &Tmux, &slug, app.current.as_deref())?;
-            app.switched(&slug);
-        }
-        Command::OpenUrl(url) => {
-            Process::new("open").arg(url).spawn()?;
-        }
-        Command::Edit(path) => {
-            suspended(terminal, || edit(&path))?;
-            if let Some(slug) = owning_project(app, &path) {
-                ops::reindex_project(&slug);
-            }
-        }
-        Command::NewNote(slug) => {
-            let path = ops::new_note(&slug, "")?;
-            let result = suspended(terminal, || edit(&path));
-            ops::finish_note(&slug, &path);
-            result?;
-        }
-        Command::Freeze {
-            slug,
-            handoff,
-            condition,
-            close,
-        } => {
-            ops::freeze(cfg, &Tmux, &slug, handoff, condition, close)?;
-            app.flash(format!("froze {slug}"));
-            if matches!(&app.screen, Screen::Project(s) if *s == slug) {
-                app.screen = Screen::Home;
-            }
-        }
-        Command::Thaw(slug) => {
-            ops::thaw(&slug)?;
-            app.flash(format!("{slug} is live"));
-        }
-        Command::Done(slug) => {
-            ops::done(&slug)?;
-            app.flash(format!("{slug} is done"));
-            if matches!(&app.screen, Screen::Project(s) if *s == slug) {
-                app.screen = Screen::Home;
-            }
-        }
-        Command::Reopen(slug) => {
-            ops::reopen(&slug)?;
-            app.flash(format!("{slug} is live again"));
-        }
-        Command::SetWait(slug, condition) => {
-            let described = condition.as_ref().map(|c| c.describe());
-            ops::set_wait(&Tmux, &slug, condition)?;
-            match described {
-                Some(d) => app.flash(format!("{slug} waits on {d}")),
-                None => app.flash(format!("{slug} no longer waits")),
-            }
-        }
-        Command::Create { name, dir, item } => {
-            let project = ops::create(&name, &dir)?;
-            if let Some(item) = &item {
-                ops::add_item(&project.slug, item.clone())?;
-            }
-            let items: Vec<ItemRef> = store::load(&project.slug)?.refs().cloned().collect();
-            start_refresh(cfg, tx, app, items);
-            app.reload();
-            if let Some(item) = item {
-                app.flash(format!("created {} with {}", project.name, item.label()));
-            } else if tmux::inside() {
-                ops::switch(cfg, &Tmux, &project.slug, app.current.as_deref())?;
-                app.switched(&project.slug);
-            } else {
-                app.open_project(&project.slug);
-            }
-        }
-        Command::AddItem(slug, text) => {
-            let dir = app
-                .project(&slug)
-                .and_then(|p| p.dir.clone())
-                .filter(|d| d.is_dir())
-                .map(Ok)
-                .unwrap_or_else(std::env::current_dir)?;
-            match item::parse(&text, &parse_context(cfg, &dir)) {
-                Ok(item) => {
-                    if ops::add_item(&slug, item.clone())? {
-                        app.flash(format!("added {}", item.label()));
-                        start_refresh(cfg, tx, app, vec![item]);
-                    } else {
-                        app.flash(format!("{} is already here", item.label()));
-                    }
-                }
-                Err(e) => {
-                    app.modal = Some(Modal::AddItem {
-                        slug,
-                        input: app::Input::new(&text),
-                        error: Some(format!("{e:#}")),
-                    });
-                }
-            }
-        }
-        Command::AddRef(slug, item) => {
-            ops::add_item(&slug, item.clone())?;
-            app.flash(format!("added {}", item.label()));
-            start_refresh(cfg, tx, app, vec![item]);
-        }
-        Command::Remove(slug, key) => ops::remove_item(&slug, &key)?,
-        Command::Dismiss(slug, key) => ops::dismiss(&slug, &key)?,
-        Command::SetNext(slug, next) => ops::set_next(&slug, &next)?,
-        Command::Capture {
-            slug,
-            title,
-            source,
-            link,
-            body,
-        } => {
-            ops::capture(&slug, &title, &source, &link, &body)?;
-            app.flash(format!("saved note to {slug}"));
-        }
-        Command::Import(slug, query) => {
-            app.flash("asking Claude to find it in Microsoft 365…");
-            let (cfg, tx) = (Arc::clone(cfg), tx.clone());
-            thread::spawn(move || {
-                let result = brief::import(&cfg, &slug, &query)
-                    .map(|i| i.title)
-                    .map_err(|e| format!("{e:#}"));
-                let _ = tx.send(Msg::Imported(result));
-            });
-        }
-        Command::ResumeClaude(slug, session) => {
-            let project = store::load(&slug)?;
-            let running = match app.live.get(&session.id) {
-                Some(live) => live.pane.clone(),
-                None if app.live.is_empty() => {
-                    wait::claude_pane(&store::events(&slug), &session.id)
-                        .filter(|pane| tmux::busy_pane_session(pane).is_some())
-                }
-                None => None,
-            };
-            if let Some(pane) = running {
-                tmux::select_pane(&pane)?;
-                return run_command(cfg, tx, app, terminal, Command::Switch(slug));
-            }
-            let dir = session
-                .cwd
-                .clone()
-                .or(project.dir.clone())
-                .unwrap_or_else(|| PathBuf::from("."));
-            let command = claude_command(
-                "claude",
-                session.config_dir.as_deref(),
-                &format!("--resume {}", tmux::quote(&session.id)),
-            );
-            claude_window(
-                cfg,
-                app,
-                terminal,
-                &project,
-                &dir,
-                &command,
-                ClaudePlace::NewWindow,
-            )?;
-            ops::mark_claude_thawed(&slug, &session.id)?;
-        }
-        Command::FreezeClaude { slug, id, note } => {
-            let live = app.live.get(&id).cloned();
-            let session = ops::mark_claude_frozen(
-                &slug,
-                &id,
-                &note,
-                live.as_ref().and_then(|l| l.name.clone()),
-            )?;
-            let label = session.label();
-            match live {
-                Some(live) => {
-                    app.flash(format!("freezing {label}: ending Claude"));
-                    let tx = tx.clone();
-                    thread::spawn(move || {
-                        let result = ops::end_claude(&Tmux, &live).map_err(|e| format!("{e:#}"));
-                        let _ = tx.send(Msg::ClaudeEnded(label, result));
-                    });
-                }
-                None => app.flash(format!("froze {label}; t resumes it")),
-            }
-        }
-        Command::NewClaude(slug) => {
-            let project = store::load(&slug)?;
-            let dir = project
-                .dir
-                .clone()
-                .filter(|d| d.is_dir())
-                .unwrap_or_else(|| app.start_dir.clone());
-            let command =
-                claude_command(&cfg.claude.command, cfg.claude.config_path().as_deref(), "");
-            claude_window(
-                cfg,
-                app,
-                terminal,
-                &project,
-                &dir,
-                &command,
-                ClaudePlace::SplitUnlessRunning,
-            )?;
-        }
-        Command::Evaluate(slug, item) => {
-            app.start_job(&item, "starting");
-            app.respond_failures.remove(&item.key());
-            app.responses = None;
-            app.flash(format!(
-                "Claude is answering the threads on {}; this takes a few minutes, and the row \
-                 shows when it is done",
-                item.label()
-            ));
-            let (cfg, tx) = (Arc::clone(cfg), tx.clone());
-            thread::spawn(move || {
-                let progress = |step: String| {
-                    let _ = tx.send(Msg::Progress(item.clone(), step));
-                };
-                let result = respond::run(&cfg, &slug, &item, &progress)
-                    .map(|e| e.responses.len())
-                    .map_err(|e| format!("{e:#}"));
-                let _ = tx.send(Msg::Evaluated(item, result));
-            });
-        }
-        Command::SaveResponses(slug, evaluation) => respond::save(&slug, &evaluation)?,
-        Command::EditReply(slug, item, index) => {
-            let mut evaluation = respond::load(&slug, &item).context("the responses are gone")?;
-            let response = evaluation
-                .responses
-                .get_mut(index)
-                .context("the response is gone")?;
-            let path = respond::draft_path(&slug);
-            store::write_atomic(&path, format!("{}\n", response.reply).as_bytes())?;
-            let result = suspended(terminal, || edit(&path));
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            let _ = std::fs::remove_file(&path);
-            result?;
-            if text.trim().is_empty() {
-                app.flash("an empty reply is not saved; the draft is unchanged");
-            } else {
-                response.reply = text.trim().to_string();
-                respond::save(&slug, &evaluation)?;
-            }
-        }
-        Command::PostReplies(slug, item, picks) => {
-            let evaluation = respond::load(&slug, &item).context("the responses are gone")?;
-            app.start_job(&item, "posting");
-            let (cfg, tx) = (Arc::clone(cfg), tx.clone());
-            thread::spawn(move || {
-                let progress = |step: String| {
-                    let _ = tx.send(Msg::Progress(item.clone(), step));
-                };
-                let outcome = respond::post(&cfg, &evaluation, &picks, &progress);
-                let _ = tx.send(Msg::Posted(slug, item, outcome));
-            });
-        }
-        Command::HandFixes(slug, item, picks) => {
-            let mut evaluation = respond::load(&slug, &item).context("the responses are gone")?;
-            let url = app
-                .state(&item)
-                .and_then(|s| s.url.clone())
-                .unwrap_or_default();
-            let note = ops::capture(
-                &slug,
-                &format!("Fix plan for {}", item.label()),
-                "ai",
-                &url,
-                &respond::fix_note(&evaluation, &picks),
-            )?;
-            for i in &picks {
-                if let Some(r) = evaluation.responses.get_mut(*i) {
-                    r.handed = true;
-                }
-            }
-            respond::save(&slug, &evaluation)?;
-            let project = store::load(&slug)?;
-            let command = claude_command(
-                &cfg.claude.command,
-                cfg.claude.config_path().as_deref(),
-                &tmux::quote(&respond::fix_prompt(&note)),
-            );
-            claude_window(
-                cfg,
-                app,
-                terminal,
-                &project,
-                &evaluation.dir,
-                &command,
-                ClaudePlace::SplitUnlessRunning,
-            )?;
-        }
-        Command::ReadClipboard(slug) => {
-            let body = clipboard();
-            if body.trim().is_empty() {
-                app.fail("the clipboard is empty");
-            } else {
-                app.start_capture(slug, body);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn owning_project(app: &App, path: &Path) -> Option<String> {
-    let projects_dir = store::projects_dir();
-    if let Ok(rest) = path.strip_prefix(&projects_dir) {
-        return rest
-            .components()
-            .next()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned());
-    }
-    app.projects
-        .iter()
-        .find(|p| {
-            p.refs()
-                .any(|r| matches!(r, ItemRef::File { path: f } if f == path))
-        })
-        .map(|p| p.slug.clone())
-}
-
 #[cfg(test)]
 mod update_tests {
     use super::*;
@@ -1537,39 +667,5 @@ mod update_tests {
             SKILL.starts_with("---\nname: ctx-update\ndescription: "),
             "{SKILL}"
         );
-    }
-}
-
-#[cfg(test)]
-mod claude_tests {
-    use super::*;
-
-    #[test]
-    fn claude_command_sets_the_config_environment() {
-        assert_eq!(
-            claude_command("claude", Some(Path::new("/c/d")), "--resume 'x'"),
-            "CLAUDE_CONFIG_DIR='/c/d' CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --resume 'x'"
-        );
-        assert_eq!(claude_command(" claude ", None, ""), "claude");
-    }
-
-    #[test]
-    fn the_post_summary_names_replies_and_resolved_threads() {
-        let pr = ItemRef::AdoPr { id: 7 };
-        let summary = |replied, resolved| respond::PostSummary {
-            replied,
-            resolved,
-            error: None,
-        };
-        assert_eq!(
-            post_summary(&summary(2, 1), &pr),
-            "posted 2 replies and resolved 1 thread on PR 7"
-        );
-        assert_eq!(post_summary(&summary(1, 0), &pr), "posted 1 reply on PR 7");
-        assert_eq!(
-            post_summary(&summary(0, 2), &pr),
-            "resolved 2 threads on PR 7"
-        );
-        assert_eq!(post_summary(&summary(0, 0), &pr), "nothing reached PR 7");
     }
 }
