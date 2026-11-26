@@ -362,8 +362,12 @@ pub fn parse_when(text: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let today = now.with_timezone(&Local).date_naive();
     let current = today.weekday().num_days_from_monday() as i64;
     let ahead = (target - current).rem_euclid(7);
-    let ahead = if ahead == 0 { 7 } else { ahead };
-    nine(today + Duration::days(ahead))
+    let at = nine(today + Duration::days(ahead))?;
+    if at > now {
+        Some(at)
+    } else {
+        nine(today + Duration::days(ahead + 7))
+    }
 }
 
 /// The pane a Claude session runs in: where it last started, unless it ended or another session
@@ -754,6 +758,32 @@ mod tests {
         assert!(thu > now && thu <= now + Duration::days(7));
         assert!(parse_when("2026-11-20", now).is_some());
         assert_eq!(parse_when("soon", now), None);
+    }
+
+    #[test]
+    fn a_weekday_is_its_next_nine_oclock_still_ahead() {
+        use chrono::{Local, NaiveDate, TimeZone};
+        let thursday = NaiveDate::from_ymd_opt(2026, 11, 26).unwrap();
+        let local = |date: NaiveDate, hour: u32| {
+            Local
+                .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+                .earliest()
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let next_thursday = thursday + Duration::days(7);
+        assert_eq!(
+            parse_when("thu", local(thursday, 8)),
+            Some(local(thursday, 9))
+        );
+        assert_eq!(
+            parse_when("thu", local(thursday, 10)),
+            Some(local(next_thursday, 9))
+        );
+        assert_eq!(
+            parse_when("fri", local(thursday, 10)),
+            Some(local(thursday + Duration::days(1), 9))
+        );
     }
 
     #[test]
