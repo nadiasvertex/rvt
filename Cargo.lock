@@ -1290,6 +1290,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "async-channel",
+ "chrono",
  "ctx-core",
  "gpui-kit",
 ]

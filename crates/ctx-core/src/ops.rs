@@ -13,6 +13,7 @@ use crate::changes::{self, Change};
 use crate::config::Config;
 use crate::item::{ItemRef, ItemState};
 use crate::live::{self, LiveSession};
+use crate::order;
 use crate::search;
 use crate::store::{
     self, ClaudeSession, Entry, FrozenSession, Handoff, MarkKind, Note, Project, State,
@@ -491,6 +492,8 @@ pub fn create(name: &str, cwd: &Path) -> Result<Project> {
             }
         }
     }
+    // A new project goes to the top of the sidebar.
+    let _ = order::add_to_top(&project.slug);
     store::commit(&format!("Create {}", project.slug));
     reindex_project(&project.slug);
     store::load(&project.slug)

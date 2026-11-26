@@ -2,7 +2,7 @@
 
 ctx-core holds ctx's projects and the work done on them, without a user interface. It covers the
 project store and journal, item references and refresh, the Unfiled inbox, wait conditions and
-the watcher, search, Claude summaries, briefs and review responses, and the operations that
+the watcher, the sidebar order and groups, search, Claude summaries, briefs and review responses, and the operations that
 change a project. The `ctx` binary in `crates/ctx` is built on it, and
 [its README](../ctx/README.md) describes how ctx works for its users.
 

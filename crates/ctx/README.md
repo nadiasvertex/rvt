@@ -7,8 +7,12 @@ coming back shows what changed since you left. Wait conditions on live or frozen
 themselves, so projects that are ready to work on come to the top.
 
 ctx is becoming a desktop app with its own terminals. The tmux interface is gone. On macOS,
-`ctx` with no arguments opens the app, which so far is one window with a terminal running your
-login shell. Until the app shows projects, ctx 0.3.0 stays the version for daily use. Both
+`ctx` with no arguments opens the app. It shows the projects in a sidebar grouped as Live, Ready,
+Waiting and Unfiled. Drag a project to reorder it within its group. With no project selected,
+the app shows the home view. A selected project shows a terminal running your login shell and
+the project panel, which ⌘I hides. The panel has the handoff, what changed since you left,
+items, Claude sessions and the journal. Until the app has workspaces and actions, ctx 0.3.0
+stays the version for daily use. Both
 versions read and write the same project files.
 
 ## Setup
@@ -124,6 +128,7 @@ item, to each project the entry went to. `--message -` reads the summary from st
   cache.json          the latest state of every item
   inbox.json          your PRs, MRs and work items, for the app's Unfiled section
   index.db            the search index; ctx reindex rebuilds it
+  order               the sidebar order, one project slug per line
 ```
 
 The `projects` directory is a git repository, and ctx commits after each freeze and state change.

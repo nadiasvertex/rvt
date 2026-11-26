@@ -45,7 +45,6 @@ pub struct TerminalView {
     focus: FocusHandle,
     metrics: Rc<RefCell<Metrics>>,
     title: String,
-    shown_title: String,
     /// Scrolled distance not yet turned into whole lines.
     scroll_lines: f32,
     selecting: bool,
@@ -88,11 +87,19 @@ impl TerminalView {
                 line_height,
             })),
             title: "ctx".into(),
-            shown_title: String::new(),
             scroll_lines: 0.0,
             selecting: false,
             _events: task,
         }
+    }
+
+    /// The title the program set, or `ctx`.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
     }
 
     fn on_event(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -346,10 +353,6 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.shown_title != self.title {
-            window.set_window_title(&self.title);
-            self.shown_title = self.title.clone();
-        }
         let focused = self.focus.is_focused(window);
         let pty = self.pty.clone();
         let metrics = self.metrics.clone();

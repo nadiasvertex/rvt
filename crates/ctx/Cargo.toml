@@ -11,5 +11,6 @@ ctx-core.workspace = true
 # The ctx app runs on macOS only for now. Elsewhere ctx is the command line alone.
 [target.'cfg(target_os = "macos")'.dependencies]
 alacritty_terminal = "0.26.0"
+chrono.workspace = true
 async-channel = "2.5.0"
 gpui-kit = "=0.11.0"
