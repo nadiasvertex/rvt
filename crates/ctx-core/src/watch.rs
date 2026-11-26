@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::ops;
 use crate::refresh;
 use crate::store::{self, ClaudeSession, State};
-use crate::tmux;
+use crate::terminals::Terminals;
 use crate::wait::{Condition, Event, EventKind};
 
 /// How often wait conditions are checked between refreshes. Dates and events written while the
@@ -47,8 +47,8 @@ pub fn running() -> Option<u32> {
 }
 
 /// Refreshes items every few minutes and checks wait conditions every few seconds. With
-/// `daemon`, a second watcher exits at once and the watcher stops when the tmux server does.
-pub fn run(cfg: &Config, daemon: bool, once: bool) -> Result<()> {
+/// `daemon`, a second watcher exits at once and the watcher stops when the front end does.
+pub fn run(cfg: &Config, terminals: &dyn Terminals, daemon: bool, once: bool) -> Result<()> {
     if let Some(pid) = running() {
         if daemon {
             return Ok(());
@@ -66,11 +66,11 @@ pub fn run(cfg: &Config, daemon: bool, once: bool) -> Result<()> {
             round = round.wrapping_add(1);
             next_refresh = Instant::now() + interval;
         }
-        check_all();
+        check_all(terminals);
         if once {
             break;
         }
-        if daemon && !tmux::server_running() {
+        if daemon && !terminals.running() {
             break;
         }
         thread::sleep(CHECK_EVERY);
@@ -111,10 +111,10 @@ fn refresh_round(cfg: &Config, round: u32, quiet: &mut HashMap<String, u32>) {
     }
 }
 
-fn check_all() {
+fn check_all(terminals: &dyn Terminals) {
     for project in store::list() {
         if project.state != State::Done && project.waiting() {
-            ops::evaluate(&project.slug);
+            ops::evaluate(terminals, &project.slug);
         }
     }
 }
@@ -137,7 +137,7 @@ struct HookPayload {
 
 /// Handles a Claude Code hook. Does nothing outside a project session, and never fails, so a
 /// hook cannot get in Claude's way.
-pub fn event(kind: &str) -> Result<()> {
+pub fn event(terminals: &dyn Terminals, kind: &str) -> Result<()> {
     let Some(slug) = std::env::var("CTX_PROJECT").ok().filter(|s| !s.is_empty()) else {
         return Ok(());
     };
@@ -156,7 +156,7 @@ pub fn event(kind: &str) -> Result<()> {
         let _ = std::io::stdin().read_to_string(&mut input);
     }
     let payload: HookPayload = serde_json::from_str(&input).unwrap_or_default();
-    let pane = std::env::var("TMUX_PANE").ok();
+    let pane = terminals.current_terminal();
     let event = Event {
         time: Utc::now(),
         kind,
@@ -206,14 +206,14 @@ pub fn event(kind: &str) -> Result<()> {
             }
         }
     } else {
-        ops::evaluate(&slug);
+        ops::evaluate(terminals, &slug);
     }
     Ok(())
 }
 
 /// Runs a command in the foreground and records when it exits. Unless the project already
 /// waits on something, it waits on this command.
-pub fn run_command(args: &[String], set_wait: bool) -> Result<i32> {
+pub fn run_command(terminals: &dyn Terminals, args: &[String], set_wait: bool) -> Result<i32> {
     let Some((program, rest)) = args.split_first() else {
         bail!("usage: ctx run [--no-wait] -- <command> [args...]");
     };
@@ -227,7 +227,7 @@ pub fn run_command(args: &[String], set_wait: bool) -> Result<i32> {
             &Event {
                 time: Utc::now(),
                 kind: EventKind::CommandStart,
-                pane: std::env::var("TMUX_PANE").ok(),
+                pane: terminals.current_terminal(),
                 session: None,
                 detail: label.clone(),
             },
@@ -235,6 +235,7 @@ pub fn run_command(args: &[String], set_wait: bool) -> Result<i32> {
         let waiting = store::load(slug).is_ok_and(|p| p.waiting());
         if set_wait && !waiting {
             ops::set_wait(
+                terminals,
                 slug,
                 Some(Condition::Command {
                     label: label.clone(),
@@ -253,12 +254,12 @@ pub fn run_command(args: &[String], set_wait: bool) -> Result<i32> {
             &Event {
                 time: Utc::now(),
                 kind: EventKind::CommandExit,
-                pane: std::env::var("TMUX_PANE").ok(),
+                pane: terminals.current_terminal(),
                 session: None,
                 detail: code.to_string(),
             },
         );
-        ops::evaluate(slug);
+        ops::evaluate(terminals, slug);
     }
     Ok(code)
 }

@@ -17,12 +17,12 @@ use crate::search;
 use crate::store::{
     self, ClaudeSession, Entry, FrozenSession, Handoff, MarkKind, Note, Project, State,
 };
-use crate::tmux;
+use crate::terminals::Terminals;
 use crate::wait::{self, Cleared, Condition, Wait};
 
-/// The project whose tmux session this process runs in.
-pub fn current_project(projects: &[Project]) -> Option<String> {
-    if let Some(session) = tmux::current_session() {
+/// The project whose workspace this process runs in.
+pub fn current_project(terminals: &dyn Terminals, projects: &[Project]) -> Option<String> {
+    if let Some(session) = terminals.current_workspace() {
         return projects
             .iter()
             .find(|p| p.session == session)
@@ -34,10 +34,14 @@ pub fn current_project(projects: &[Project]) -> Option<String> {
 }
 
 /// The named project, or the current one when no name is given.
-pub fn resolve(projects: &[Project], name: Option<&str>) -> Result<String> {
+pub fn resolve(
+    terminals: &dyn Terminals,
+    projects: &[Project],
+    name: Option<&str>,
+) -> Result<String> {
     match name {
         Some(name) => store::find(projects, name),
-        None => match current_project(projects) {
+        None => match current_project(terminals, projects) {
             Some(slug) => Ok(slug),
             None => bail!("not in a project's tmux session, so name the project"),
         },
@@ -67,19 +71,14 @@ pub fn since(project: &Project, items: &BTreeMap<String, ItemState>, notes: &[No
     }
 }
 
-fn save_layout(project: &Project) {
-    if !tmux::has_session(&project.session) {
-        return;
-    }
-    if let Ok(layout) = tmux::capture_layout(&project.session) {
-        if !layout.is_empty() {
-            let _ = store::update(&project.slug, |p| p.layout = layout);
-        }
+fn save_layout(terminals: &dyn Terminals, project: &Project) {
+    if let Some(layout) = terminals.layout(project) {
+        let _ = store::update(&project.slug, |p| p.layout = layout);
     }
 }
 
-/// Records the visit mark and the session layout of a project you are leaving.
-pub fn leave(slug: &str) {
+/// Records the visit mark and the workspace layout of a project you are leaving.
+pub fn leave(terminals: &dyn Terminals, slug: &str) {
     let Ok(project) = store::load(slug) else {
         return;
     };
@@ -89,22 +88,23 @@ pub fn leave(slug: &str) {
         MarkKind::Visit,
         &store::mark_now(&project, &cache.items),
     );
-    save_layout(&project);
+    save_layout(terminals, &project);
 }
 
-/// Leaves `from`, makes sure the target session exists, and moves the client there.
-pub fn switch(cfg: &Config, slug: &str, from: Option<&str>) -> Result<()> {
+/// Leaves `from`, makes sure the target workspace is open, and moves the user there.
+pub fn switch(
+    cfg: &Config,
+    terminals: &dyn Terminals,
+    slug: &str,
+    from: Option<&str>,
+) -> Result<()> {
     if let Some(from) = from.filter(|f| *f != slug) {
-        leave(from);
+        leave(terminals, from);
     }
     let project = store::load(slug)?;
-    tmux::ensure_session(&project)?;
-    let inside = tmux::inside();
-    tmux::switch_to(&project.session)?;
-    if inside && cfg.tmux.switch_message {
-        tmux::message(&switch_message(&project));
-    }
-    Ok(())
+    terminals.open(&project)?;
+    let note = cfg.tmux.switch_message.then(|| switch_message(&project));
+    terminals.show(&project, note.as_deref())
 }
 
 fn switch_message(project: &Project) -> String {
@@ -152,13 +152,14 @@ pub fn reindex_project(slug: &str) {
 
 pub fn freeze(
     cfg: &Config,
+    terminals: &dyn Terminals,
     slug: &str,
     handoff: Handoff,
     condition: Option<Condition>,
     close: bool,
 ) -> Result<()> {
     let project = store::load(slug)?;
-    save_layout(&project);
+    save_layout(terminals, &project);
     let cache = cache::load();
     let mark = store::mark_now(&project, &cache.items);
     store::save_mark(slug, MarkKind::Snapshot, &mark)?;
@@ -188,13 +189,12 @@ pub fn freeze(
     if cfg.claude.summarize_on_freeze {
         spawn_detached(&["summarize", slug]);
     }
-    if close && tmux::has_session(&project.session) {
-        freeze_claudes_in_session(cfg, &project)?;
-        if tmux::current_session().as_deref() == Some(project.session.as_str()) {
-            tmux::ensure_home_session()?;
-            tmux::switch_to(tmux::HOME_SESSION)?;
+    if close && terminals.is_open(&project) {
+        freeze_claudes_in_session(cfg, terminals, &project)?;
+        if terminals.current_workspace().as_deref() == Some(project.session.as_str()) {
+            terminals.show_home()?;
         }
-        tmux::kill_session(&project.session)?;
+        terminals.close(&project)?;
     }
     Ok(())
 }
@@ -288,10 +288,10 @@ const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Ends a running Claude session and waits for it to exit. An idle session in a known pane
 /// gets `/exit`, so it shuts down cleanly and runs its SessionEnd hooks; otherwise, or if that
 /// does not end it, the process gets SIGTERM.
-pub fn end_claude(session: &LiveSession) -> Result<()> {
+pub fn end_claude(terminals: &dyn Terminals, session: &LiveSession) -> Result<()> {
     if session.status == live::Status::Idle {
         if let Some(pane) = &session.pane {
-            if tmux::type_line(pane, "/exit").is_ok() && exited(session, EXIT_WAIT) {
+            if terminals.type_line(pane, "/exit").is_ok() && exited(session, EXIT_WAIT) {
                 return Ok(());
             }
         }
@@ -322,14 +322,18 @@ fn exited(session: &LiveSession, within: std::time::Duration) -> bool {
     live::ended(session)
 }
 
-/// Marks the Claude sessions running in the project's tmux session frozen, before the tmux
-/// session closes and ends them, so they can be resumed.
-fn freeze_claudes_in_session(cfg: &Config, project: &Project) -> Result<()> {
+/// Marks the Claude sessions running in the project's workspace frozen, before the workspace
+/// closes and ends them, so they can be resumed.
+fn freeze_claudes_in_session(
+    cfg: &Config,
+    terminals: &dyn Terminals,
+    project: &Project,
+) -> Result<()> {
     for (session, running) in live_claudes(cfg, project) {
         let inside = running
             .pane
             .as_deref()
-            .and_then(tmux::pane_session)
+            .and_then(|pane| terminals.workspace_of(pane))
             .is_some_and(|s| s == project.session);
         if inside {
             mark_claude_frozen(
@@ -387,7 +391,7 @@ pub fn reopen(slug: &str) -> Result<()> {
     set_state(slug, State::Live, "reopened").map(|_| ())
 }
 
-pub fn set_wait(slug: &str, condition: Option<Condition>) -> Result<()> {
+pub fn set_wait(terminals: &dyn Terminals, slug: &str, condition: Option<Condition>) -> Result<()> {
     let heading = match &condition {
         Some(c) => format!("waiting on {}", c.describe()),
         None => "wait removed".to_string(),
@@ -395,12 +399,12 @@ pub fn set_wait(slug: &str, condition: Option<Condition>) -> Result<()> {
     store::append_journal(slug, &heading, "")?;
     store::update(slug, |p| p.wait = condition.map(Wait::new))?;
     store::commit(&format!("Wait in {slug}"));
-    evaluate(slug);
+    evaluate(terminals, slug);
     Ok(())
 }
 
-/// Clears the project's wait condition if it is met, and says so in tmux. Returns the reason.
-pub fn evaluate(slug: &str) -> Option<String> {
+/// Clears the project's wait condition if it is met, and tells the user. Returns the reason.
+pub fn evaluate(terminals: &dyn Terminals, slug: &str) -> Option<String> {
     let project = store::load(slug).ok()?;
     let wait = project.wait.as_ref().filter(|w| w.is_waiting())?;
     let reason = wait::check(wait, &cache::load().items, &store::events(slug), Utc::now())?;
@@ -416,7 +420,7 @@ pub fn evaluate(slug: &str) -> Option<String> {
     .ok()?;
     let _ = store::append_journal(slug, &format!("ready: {reason}"), "");
     store::commit(&format!("Ready {slug}"));
-    tmux::message(&format!("ctx · {}: {reason}", project.name));
+    terminals.message(&format!("ctx · {}: {reason}", project.name));
     Some(reason)
 }
 
@@ -649,6 +653,87 @@ pub fn suggestions(
         }
     }
     found
+}
+
+/// Finds a project item by its label, key, or the number in it, and returns its key and
+/// label.
+pub fn find_item(project: &Project, arg: &str) -> Option<(String, String)> {
+    let arg = arg.trim().to_lowercase();
+    let digits: String = arg.chars().filter(|c| c.is_ascii_digit()).collect();
+    project
+        .refs()
+        .find(|r| {
+            let label = r.label().to_lowercase();
+            label == arg
+                || r.key().to_lowercase() == arg
+                || (!digits.is_empty()
+                    && label.ends_with(&digits)
+                    && label.contains(arg.trim_start_matches(['#', '!'])))
+        })
+        .map(|r| (r.key(), r.label()))
+}
+
+/// The project's Claude session that `query` names, by the start of its ID or by its name, and
+/// its process when it runs.
+pub fn find_claude(
+    cfg: &Config,
+    project: &Project,
+    query: &str,
+) -> Result<(ClaudeSession, Option<LiveSession>)> {
+    let live = live::sessions(&claude_config_dirs(
+        cfg.claude.config_path(),
+        std::slice::from_ref(project),
+    ));
+    let matches: Vec<&ClaudeSession> = project
+        .claude_sessions
+        .iter()
+        .filter(|s| {
+            s.id.starts_with(query)
+                || s.name.as_deref() == Some(query)
+                || live.get(&s.id).and_then(|l| l.name.as_deref()) == Some(query)
+        })
+        .collect();
+    let session = match matches.as_slice() {
+        [one] => (*one).clone(),
+        [] => bail!("{} has no Claude session matching {query}", project.name),
+        _ => bail!(
+            "{query} matches more than one Claude session in {}",
+            project.name
+        ),
+    };
+    let running = live.get(&session.id).cloned();
+    Ok((session, running))
+}
+
+/// Writes an empty note to fill in, and returns its path.
+pub fn new_note(slug: &str, title: &str) -> Result<PathBuf> {
+    let path = store::new_note_path(
+        slug,
+        if title.trim().is_empty() {
+            "note"
+        } else {
+            title
+        },
+    );
+    let note = Note {
+        path: path.clone(),
+        title: title.trim().to_string(),
+        source: "local".into(),
+        link: String::new(),
+        captured: Utc::now(),
+        body: String::new(),
+    };
+    store::write_atomic(&path, store::note_text(&note).as_bytes())?;
+    Ok(path)
+}
+
+/// Removes a note left empty, and indexes the rest.
+pub fn finish_note(slug: &str, path: &Path) {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    if store::parse_note(path, &text).body.trim().is_empty() {
+        let _ = std::fs::remove_file(path);
+    }
+    reindex_project(slug);
 }
 
 #[cfg(test)]

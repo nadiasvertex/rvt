@@ -3,8 +3,19 @@ build:
     cargo build --release
 
 # Run the test suite.
-test:
+test: check-core
     cargo test
+
+# Fail when ctx-core depends on a terminal UI crate, which belongs in the ctx front end.
+check-core:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    found=$(cargo tree -p ctx-core -e normal --prefix none | grep -E '^(ratatui|crossterm|view) ' | sort -u || true)
+    if [ -n "$found" ]; then
+      echo "ctx-core must not depend on terminal UI crates, but depends on:" >&2
+      echo "$found" >&2
+      exit 1
+    fi
 
 # Build rvt and ctx and copy them to ~/bin.
 install: build

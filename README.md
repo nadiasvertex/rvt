@@ -8,7 +8,8 @@ whose findings you can check off for posting.
 The repository is a Cargo workspace. `crates/rvt` is the board, `crates/ctx` is a tool for
 switching between projects (see [its README](crates/ctx/README.md)), and `crates/forge` holds the
 Azure DevOps, GitLab, git and Claude code they share. `crates/view` draws the Markdown and comment
-threads that both show.
+threads that both show. `crates/ctx-core` holds ctx's projects and logic without its terminal
+interface, so other front ends can use them.
 
 ## Requirements
 

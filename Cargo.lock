@@ -258,15 +258,27 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "ctx-core",
  "dirs",
  "forge",
  "ratatui",
+ "serde_json",
+ "unicode-width",
+ "view",
+]
+
+[[package]]
+name = "ctx-core"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "forge",
  "rusqlite",
  "serde",
  "serde_json",
  "toml",
- "unicode-width",
- "view",
 ]
 
 [[package]]

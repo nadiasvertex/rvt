@@ -15,12 +15,12 @@ use crate::app::{
     App, AskKind, AssignPicker, CaptureForm, Confirm, FreezeClaudeForm, FreezeForm, Group, HomeRow,
     Input, Job, Modal, Pick, ResponseView, Screen, SessionState, WaitPicker,
 };
-use crate::item::{Ci, ItemRef, ItemState, Tone};
-use crate::live::Status;
-use crate::ops;
-use crate::respond::{Assessment, Evaluation, Response};
-use crate::search::{MATCH_END, MATCH_START};
-use crate::store::{self, Project, State};
+use ctx_core::item::{Ci, ItemRef, ItemState, Tone};
+use ctx_core::live::Status;
+use ctx_core::ops;
+use ctx_core::respond::{Assessment, Evaluation, Response};
+use ctx_core::search::{MATCH_END, MATCH_START};
+use ctx_core::store::{self, Project, State};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SELECTED: Style = Style::new().bg(Color::Indexed(237));
@@ -1150,7 +1150,7 @@ fn evaluation_notes(e: &Evaluation, state: Option<&ItemState>, width: usize) -> 
 }
 
 fn app_tilde(path: &std::path::Path) -> String {
-    crate::app::tilde(path)
+    ctx_core::paths::tilde(path)
 }
 
 fn response_row(e: &Evaluation, i: usize, cursor: usize, width: usize) -> Line<'static> {
@@ -1907,7 +1907,7 @@ mod detail_tests {
     }
 
     fn evaluation() -> Evaluation {
-        use crate::respond::Response;
+        use ctx_core::respond::Response;
         let response = Response {
             thread_id: "41".into(),
             location: Some("src/parse.cpp:12".into()),
@@ -2076,7 +2076,7 @@ mod detail_tests {
         assert_eq!(quiet.len(), 2, "{quiet:?}");
         e.head = Some("def".into());
         let mut s = state("");
-        s.last_comment = Some(crate::item::LastComment {
+        s.last_comment = Some(ctx_core::item::LastComment {
             author: "bob".into(),
             date: e.created + chrono::Duration::minutes(5),
             snippet: String::new(),
