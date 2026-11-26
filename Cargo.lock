@@ -1293,6 +1293,7 @@ dependencies = [
  "chrono",
  "ctx-core",
  "gpui-kit",
+ "libc",
 ]
 
 [[package]]
