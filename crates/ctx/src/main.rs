@@ -1,3 +1,6 @@
+#[cfg(target_os = "macos")]
+mod gui;
+
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::Path;
@@ -149,8 +152,10 @@ fn run(mut args: Vec<String>) -> Result<i32> {
     }
     let cfg = config::load()?;
     match command.as_deref() {
+        #[cfg(target_os = "macos")]
+        None => gui::run(),
+        #[cfg(not(target_os = "macos"))]
         None => {
-            // Step 3 of the GUI plan opens the ctx app here.
             println!("{USAGE}");
             Ok(0)
         }

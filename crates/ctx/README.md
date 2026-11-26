@@ -6,9 +6,9 @@ research notes. Freezing a project writes a short handoff and saves a snapshot o
 coming back shows what changed since you left. Wait conditions on live or frozen projects clear
 themselves, so projects that are ready to work on come to the top.
 
-ctx is becoming a desktop app with its own terminals, which `ctx` with no arguments will open. The
-tmux interface is gone, and the app is not built yet. Until it is, this version has only the
-commands that work on the project store, and ctx 0.3.0 stays the version for daily use. Both
+ctx is becoming a desktop app with its own terminals. The tmux interface is gone. On macOS,
+`ctx` with no arguments opens the app, which so far is one window with a terminal running your
+login shell. Until the app shows projects, ctx 0.3.0 stays the version for daily use. Both
 versions read and write the same project files.
 
 ## Setup
