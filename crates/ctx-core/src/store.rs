@@ -51,6 +51,8 @@ pub struct Pane {
     pub path: PathBuf,
 }
 
+/// A window of a project's workspace, saved and restored by the front end. The fields follow
+/// tmux, which is the only front end so far.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Window {
     pub name: String,
@@ -141,9 +143,9 @@ pub struct Project {
     pub slug: String,
     pub state: State,
     pub created: DateTime<Utc>,
-    /// The tmux session name.
+    /// The name of the project's workspace in the front end, such as a tmux session name.
     pub session: String,
-    /// Where new tmux windows start.
+    /// Where new terminals in the project start.
     #[serde(default)]
     pub dir: Option<PathBuf>,
     /// The next step, kept between handoffs.

@@ -22,7 +22,7 @@ pub struct LiveSession {
     pub id: String,
     pub pid: u32,
     pub status: Status,
-    /// The tmux pane ID, such as `%5`.
+    /// The terminal the session runs in: the tmux pane ID, such as `%5`, from Claude's registry.
     pub pane: Option<String>,
     pub name: Option<String>,
     /// The registry file, which Claude removes when it exits normally.

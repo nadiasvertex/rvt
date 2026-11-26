@@ -43,7 +43,7 @@ pub enum Condition {
     /// A date passes.
     Until { at: DateTime<Utc> },
     /// A Claude Code session in the project stops or asks for input. With a pane, only sessions
-    /// in that tmux pane count.
+    /// in that terminal count.
     Claude {
         #[serde(default)]
         pane: Option<String>,
@@ -154,7 +154,7 @@ impl Wait {
     }
 }
 
-/// Something that happened in a project's tmux session, recorded by `ctx event` or `ctx run`.
+/// Something that happened in a project's workspace, recorded by `ctx event` or `ctx run`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub time: DateTime<Utc>,
