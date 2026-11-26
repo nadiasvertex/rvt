@@ -2,11 +2,13 @@
 //! tabs and the project panel.
 
 mod bridge;
+mod commands;
 mod dialogs;
 mod keys;
 mod note;
 mod palette;
 mod pty;
+mod review;
 mod root;
 mod snapshot;
 mod tabs;

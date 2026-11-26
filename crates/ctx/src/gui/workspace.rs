@@ -13,6 +13,7 @@ use alacritty_terminal::event_loop::EventLoopSender;
 
 use super::bridge::OpenWorkspace;
 use super::note::{NoteEvent, NoteView};
+use super::review::{ReviewEvent, ReviewView};
 use super::pty::{GridSize, Launch, Pty};
 use super::tabs::{self, Restored, Saved};
 use super::theme::*;
@@ -56,6 +57,7 @@ enum Kind {
 enum Content {
     Terminal(Kind, Entity<TerminalView>),
     Note(Entity<NoteView>),
+    Review(Entity<ReviewView>),
 }
 
 struct Tab {
@@ -190,8 +192,24 @@ impl Workspace {
 
     /// Opens a tab that runs Claude in the project directory. The tab closes when Claude exits.
     pub fn new_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.dir.clone();
+        self.claude_with(dir, None, window, cx);
+    }
+
+    /// Opens a Claude tab in `dir`, starting with `prompt` when there is one.
+    fn claude_with(
+        &mut self,
+        dir: PathBuf,
+        prompt: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (script, args) = match prompt {
+            Some(p) => (format!("exec {} \"$1\"", self.claude.command), vec![p]),
+            None => (format!("exec {}", self.claude.command), Vec::new()),
+        };
         let mut launch = Launch {
-            command: shell_command(&format!("exec {}", self.claude.command), &[]),
+            command: shell_command(&script, &args),
             ..Launch::default()
         };
         if let Some(dir) = &self.claude.config_dir {
@@ -204,8 +222,43 @@ impl Workspace {
                 "1".into(),
             );
         }
-        let dir = self.dir.clone();
+        let dir = if dir.is_dir() { dir } else { self.dir.clone() };
         self.open_terminal(Kind::Claude, launch, dir, None, window, cx);
+    }
+
+    /// Shows an item's review replies in a tab, reusing the item's tab when it is open.
+    pub fn open_review(
+        &mut self,
+        item: ctx_core::item::ItemRef,
+        url: String,
+        config: std::sync::Arc<Option<Config>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = format!("review:{}", item.key());
+        if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
+            self.activate(i, window, cx);
+            return;
+        }
+        let slug = self.slug.clone();
+        let view = cx.new(|cx| ReviewView::new(slug, item, url, config, window, cx));
+        let events = cx.subscribe_in(&view, window, |ws, _, event, window, cx| match event {
+            ReviewEvent::HandToClaude { dir, prompt } => {
+                ws.claude_with(dir.clone(), Some(prompt.clone()), window, cx)
+            }
+        });
+        self.tabs.push(Tab {
+            id,
+            content: Content::Review(view),
+            name: None,
+            _events: events,
+        });
+        self.activate(self.tabs.len() - 1, window, cx);
+    }
+
+    /// Starts renaming the active tab.
+    pub fn rename_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_rename(self.active, window, cx);
     }
 
     /// Shows the note in a tab, reusing the note's tab when it is open.
@@ -330,6 +383,7 @@ impl Workspace {
                 tabs::auto_name(&program, dir, home.as_deref())
             }
             Content::Note(view) => view.read(cx).title(),
+            Content::Review(view) => view.read(cx).title(),
         }
     }
 
@@ -344,7 +398,7 @@ impl Workspace {
             .iter()
             .filter_map(|t| match &t.content {
                 Content::Terminal(_, view) => Some((t.id.clone(), view.read(cx).writer())),
-                Content::Note(_) => None,
+                Content::Note(_) | Content::Review(_) => None,
             })
             .collect();
         let open = OpenWorkspace {
@@ -441,6 +495,7 @@ impl Workspace {
             Content::Terminal(Kind::Claude, _) => LIVE,
             Content::Terminal(Kind::Shell, _) => FAINT,
             Content::Note(_) => ACCENT,
+            Content::Review(_) => WAIT,
         };
         let id = tab.id.clone();
         let label = match renaming {
@@ -594,6 +649,7 @@ impl Render for Workspace {
         let content = match self.tabs.get(self.active).map(|t| &t.content) {
             Some(Content::Terminal(_, view)) => view.clone().into_any_element(),
             Some(Content::Note(view)) => view.clone().into_any_element(),
+            Some(Content::Review(view)) => view.clone().into_any_element(),
             None => self.empty(cx).into_any_element(),
         };
         div()

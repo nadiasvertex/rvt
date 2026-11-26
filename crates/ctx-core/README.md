@@ -13,7 +13,8 @@ implements it to open, show and close a project's workspace, save its layout, sh
 and type into a Claude session's terminal. Operations that need terminals, such as
 `ops::switch`, `ops::freeze`, `ops::evaluate` and `watch::run`, take a `&dyn Terminals`. The
 `ctx` command line passes `Cli`, which has no workspaces and refuses what only the ctx app can
-do. The ctx app will pass its own front end.
+do. The ctx app passes its own front end, which runs the operations on background threads and
+the watcher on its own thread.
 
 Project files keep the names the tmux front end gave these values, so older ctx versions can
 still read them: `session` holds `Project::workspace`, `panes` holds `Window::terminals`, and

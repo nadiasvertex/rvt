@@ -6,26 +6,54 @@ research notes. Freezing a project writes a short handoff and saves a snapshot o
 coming back shows what changed since you left. Wait conditions on live or frozen projects clear
 themselves, so projects that are ready to work on come to the top.
 
-ctx is becoming a desktop app with its own terminals. The tmux interface is gone. On macOS,
-`ctx` with no arguments opens the app. It shows the projects in a sidebar grouped as Live, Ready,
-Waiting and Unfiled. Drag a project to reorder it within its group. With no project selected,
-the app shows the home view. A selected project shows its workspace, a set of tabs that keep
-running when you switch projects, and the project panel, which ⌘I hides. A workspace opens with
-one tab per window of the project's saved layout, or one shell in the project directory. ⌘T opens
-a terminal, ⌘⇧T a Claude tab, ⌘W closes a tab, and ⌘⇧[ and ⌘⇧] move between tabs. A tab is
-named after its program and directory; double-click it to rename it, and clear the name to go
-back. The panel has the handoff, what changed since you left, items, Claude sessions, notes and
-the journal. A note opens in a tab as rendered Markdown.
+On macOS, `ctx` with no arguments opens the ctx app, a window with its own terminals. The commands
+below work on the same store from any terminal. Elsewhere, ctx is the command line alone.
 
-The panel's buttons freeze, thaw, set a wait on, or finish the project, and a ready project's card
-on the home view thaws it. Freezing opens a dialog where Claude drafts Doing, Next and what the
-project waits on from the journal, the items and the project's running Claude sessions. You can
-change all three, write them yourself, or freeze without waiting for the draft, and choose whether
-to close the project's tabs. "+ New project" or ⌘N makes a project. While the app runs, it
-refreshes items and clears wait conditions itself, unless a `ctx watch` from ctx 0.3.0 already
-runs. The app saves a workspace's layout when you leave or freeze the project, and only once you
-have opened, closed or renamed a tab, so looking at a project keeps the layout ctx 0.3.0 saved.
-Both versions read and write the same project files.
+## The app
+
+The sidebar groups the projects as Live, Ready, Waiting and Unfiled. Drag a project to reorder it
+within its group; it keeps its place when it moves to another group. With no project selected,
+the app shows the home view: the ready projects with their handoffs, the waiting projects with
+what they wait on, and your PRs, MRs and work items that no project holds.
+
+A selected project shows its workspace and the project panel, which ⌘I hides. The workspace is a
+set of tabs that keep running when you switch projects. It opens with one tab per window of the
+project's saved layout, or one shell in the project directory.
+
+| Keys | What they do |
+| ---- | ------------ |
+| ⇧ ⇧ | Open the command palette |
+| ⌘N | Make a project |
+| ⌘T | Open a terminal in the current tab's directory |
+| ⌘⇧T | Open a Claude tab in the project directory |
+| ⌘W | Close the tab |
+| ⌘⇧[ and ⌘⇧] | Move between tabs |
+| ⌘I | Show or hide the panel |
+
+A tab is named after its program and directory, such as `zsh · rvt`. Double-click a tab to rename
+it, and clear the name to go back. Every terminal has `CTX_PROJECT` and `CTX_TERMINAL` set, so the
+Claude hooks and the commands below know which project and terminal they run in.
+
+The panel has the handoff, what changed since you left, items, Claude sessions, notes and the
+journal, with buttons to freeze, thaw, set a wait on, or finish the project. A note opens in a tab
+as rendered Markdown and reloads when the file changes. A PR or MR opens its review replies in a
+tab: Ask Claude reads the open threads that wait on you, judges each comment against the code in a
+checkout of the branch, plans a fix and drafts a reply. You edit the replies, check the ones to
+send, and post them, resolving the threads you chose. Checked plans can go to a new Claude tab,
+which works from a note that lists them. Nothing reaches the PR until you post it.
+
+Freezing opens a dialog where Claude drafts Doing, Next and what the project waits on, from the
+journal, the items and the project's running Claude sessions. You can change all three, write them
+yourself, or freeze without waiting for the draft, and choose whether to close the project's tabs.
+
+The command palette opens when you press Shift twice, or from Search in the title bar. It finds
+projects, notes, items and journal entries, and runs the app's actions. Typing `>` limits it to
+actions.
+
+While the app runs, it refreshes items and clears wait conditions itself, unless a `ctx watch`
+from ctx 0.3.0 already runs. The app saves a workspace's layout when you leave or freeze the
+project, and only once you have opened, closed or renamed a tab, so looking at a project keeps a
+layout that ctx 0.3.0 saved. Both versions read and write the same project files.
 
 ## Setup
 

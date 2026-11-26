@@ -16,6 +16,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use super::bridge::{self, Bridge, Command};
+use super::commands::{Action, Choice, DoubleShift, Listed, Palette, PaletteEvent};
 use super::dialogs::{self, DialogEvent, FreezeDialog, NewProjectDialog, WaitDialog};
 use super::snapshot::{JournalEntry, Snapshot, fingerprint};
 use super::text;
@@ -77,6 +78,9 @@ pub struct Root {
     toasts: Vec<(u64, String)>,
     next_toast: u64,
     dialog: Option<(AnyView, Subscription)>,
+    /// Whether the dialog sits near the top, as the palette does, rather than in the middle.
+    dialog_top: bool,
+    double_shift: DoubleShift,
     focus: FocusHandle,
     shown_title: String,
     _reload: Task<()>,
@@ -150,7 +154,17 @@ impl Root {
                                     Ok("freeze") => root.freeze(&slug, window, cx),
                                     Ok("wait") => root.wait(&slug, window, cx),
                                     Ok("new") => root.new_project(window, cx),
+                                    Ok("palette") => root.open_palette(window, cx),
                                     _ => {}
+                                }
+                                // And open an item's review tab, by item key.
+                                if let Ok(key) = std::env::var("CTX_GUI_REVIEW") {
+                                    let item = root
+                                        .selected_project()
+                                        .and_then(|p| p.refs().find(|r| r.key() == key).cloned());
+                                    if let Some(item) = item {
+                                        root.open_review(item, window, cx);
+                                    }
                                 }
                             }
                         }
@@ -191,6 +205,8 @@ impl Root {
             toasts: Vec::new(),
             next_toast: 0,
             dialog: None,
+            dialog_top: false,
+            double_shift: DoubleShift::default(),
             focus,
             shown_title: String::new(),
             _reload: reload,
@@ -316,8 +332,108 @@ impl Root {
         cx.notify();
     }
 
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = Utc::now();
+        let mut projects = Vec::new();
+        for (group, members) in self.snapshot.groups() {
+            for p in members {
+                projects.push(Listed {
+                    slug: p.slug.clone(),
+                    name: p.name.clone(),
+                    detail: format!("{} · {}", group.label(), text::status(&self.snapshot, p, now)),
+                });
+            }
+        }
+        let state = self.selected_project().map(|p| p.state);
+        let palette = cx.new(|cx| Palette::new(projects, state, window, cx));
+        let events = cx.subscribe_in(&palette, window, |root, _, event, window, cx| match event {
+            PaletteEvent::Close => root.close_dialog(window, cx),
+            PaletteEvent::Run(choice) => {
+                let choice = choice.clone();
+                root.close_dialog(window, cx);
+                root.run_choice(choice, window, cx);
+            }
+        });
+        self.dialog = Some((palette.into(), events));
+        self.dialog_top = true;
+        cx.notify();
+    }
+
+    fn run_choice(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
+        match choice {
+            Choice::Project(slug) => self.select(Some(slug), window, cx),
+            Choice::Note { slug, path } => {
+                self.select(Some(slug), window, cx);
+                self.open_note(path, window, cx);
+            }
+            Choice::Item { slug, key } => {
+                self.select(Some(slug.clone()), window, cx);
+                let item = self
+                    .snapshot
+                    .project(&slug)
+                    .and_then(|p| p.refs().find(|r| r.key() == key).cloned());
+                if let Some(item) = item.filter(reviewable) {
+                    self.open_review(item, window, cx);
+                }
+            }
+            Choice::Journal { slug } => {
+                self.select(Some(slug), window, cx);
+                self.journal_open = true;
+                self.panel_open = false;
+                self.toggle_panel(cx);
+            }
+            Choice::Action(action) => self.run_action(action, window, cx),
+        }
+    }
+
+    fn run_action(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        let slug = self.selected.clone();
+        let ws = self.workspace_entity().cloned();
+        match (action, slug) {
+            (Action::Home, _) => self.select(None, window, cx),
+            (Action::NewProject, _) => self.new_project(window, cx),
+            (Action::TogglePanel, _) => self.toggle_panel(cx),
+            (Action::Freeze, Some(s)) => self.freeze(&s, window, cx),
+            (Action::Thaw, Some(s)) => self.thaw(&s, window, cx),
+            (Action::Wait, Some(s)) => self.wait(&s, window, cx),
+            (Action::Done, Some(s)) => self.done(&s, window, cx),
+            (Action::ShowJournal, Some(_)) => {
+                self.journal_open = true;
+                if !self.panel_open {
+                    self.toggle_panel(cx);
+                }
+            }
+            (Action::NewTerminal | Action::NewClaude | Action::RenameTab | Action::CloseTab, _) => {
+                if let Some(ws) = ws {
+                    ws.update(cx, |ws, cx| match action {
+                        Action::NewTerminal => ws.new_shell(window, cx),
+                        Action::NewClaude => ws.new_claude(window, cx),
+                        Action::RenameTab => ws.rename_active(window, cx),
+                        _ => window.dispatch_action(Box::new(super::workspace::CloseTab), cx),
+                    });
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Shows the item's review replies in a tab of the selected project.
+    fn open_review(&mut self, item: ctx_core::item::ItemRef, window: &mut Window, cx: &mut Context<Self>) {
+        let url = self
+            .snapshot
+            .state(&item)
+            .and_then(|s| s.url.clone())
+            .unwrap_or_default();
+        let config = self.config.clone();
+        if let Some(ws) = self.workspace_entity().cloned() {
+            ws.update(cx, |ws, cx| ws.open_review(item, url, config, window, cx));
+        }
+    }
+
     fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dialog = None;
+        self.dialog_top = false;
         match self.workspace_entity() {
             Some(ws) => ws.read(cx).focus_target(cx).focus(window, cx),
             None => self.focus.focus(window, cx),
@@ -496,9 +612,10 @@ impl Root {
         cx.notify();
     }
 
-    fn header(&self, title: &str) -> impl IntoElement {
+    fn header(&self, title: &str, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("header")
+            .relative()
             .h(px(HEADER_HEIGHT))
             .flex_none()
             .flex()
@@ -522,6 +639,30 @@ impl Root {
                     .text_color(rgb(SECONDARY))
                     .font_weight(FontWeight::MEDIUM)
                     .child(title.to_string()),
+            )
+            .child(
+                div()
+                    .id("palette-button")
+                    .absolute()
+                    .right(px(12.0))
+                    .px(px(10.0))
+                    .py(px(3.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(CONTROL_BORDER))
+                    .text_size(px(12.0))
+                    .text_color(rgb(SECONDARY))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(RAISED)).text_color(rgb(TEXT)))
+                    // A mouse down here must not start moving the window.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|root, _, window, cx| {
+                            cx.stop_propagation();
+                            root.open_palette(window, cx);
+                        }),
+                    )
+                    .child("Search  ⇧⇧"),
             )
     }
 
@@ -1161,14 +1302,23 @@ impl Root {
                         meta.insert(0, "conflicts".into());
                     }
                 }
+                let review = reviewable(item).then(|| item.clone());
                 items = items.child(
                     div()
+                        .id(SharedString::from(format!("item-{}", item.key())))
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
                         .px(px(10.0))
                         .py(px(8.0))
                         .rounded(px(6.0))
+                        .when_some(review, |d, item| {
+                            d.cursor_pointer()
+                                .hover(|s| s.bg(rgb(RAISED)))
+                                .on_click(cx.listener(move |root, _, window, cx| {
+                                    root.open_review(item.clone(), window, cx)
+                                }))
+                        })
                         .child(
                             div()
                                 .flex()
@@ -1446,12 +1596,24 @@ impl Render for Root {
             .relative()
             .on_action(cx.listener(|root, _: &TogglePanel, _, cx| root.toggle_panel(cx)))
             .on_action(cx.listener(|root, _: &NewProject, window, cx| root.new_project(window, cx)))
+            .on_modifiers_changed(cx.listener(|root, event: &ModifiersChangedEvent, window, cx| {
+                let m = event.modifiers;
+                let others = m.control || m.alt || m.platform || m.function;
+                let shift_alone = m.shift && !others;
+                let nothing = !m.shift && !others;
+                if root.double_shift.modifiers(shift_alone, nothing, Instant::now())
+                    && root.dialog.is_none()
+                {
+                    root.open_palette(window, cx);
+                }
+            }))
+            .capture_key_down(cx.listener(|root, _: &KeyDownEvent, _, _| root.double_shift.key()))
             .on_drop(cx.listener(|root, _: &Dragged, _, cx| {
                 // A drop outside the project rows leaves the order as it was.
                 root.drop_at = None;
                 cx.notify();
             }))
-            .child(self.header(&title))
+            .child(self.header(&title, cx))
             .child(
                 div()
                     .flex_1()
@@ -1468,7 +1630,8 @@ impl Render for Root {
                     .absolute()
                     .inset_0()
                     .flex()
-                    .items_center()
+                    .when(self.dialog_top, |d| d.items_start())
+                    .when(!self.dialog_top, |d| d.items_center())
                     .justify_center()
                     .bg(hsla(0.0, 0.0, 0.0, 0.5))
                     .occlude()
@@ -1480,6 +1643,14 @@ impl Render for Root {
                     .child(view.clone())
             }))
     }
+}
+
+/// Whether the item has review threads the review tab can show: a PR or an MR.
+fn reviewable(item: &ctx_core::item::ItemRef) -> bool {
+    matches!(
+        item,
+        ctx_core::item::ItemRef::AdoPr { .. } | ctx_core::item::ItemRef::GitlabMr { .. }
+    )
 }
 
 fn group_heading(label: &str, count: usize) -> impl IntoElement + use<> {
