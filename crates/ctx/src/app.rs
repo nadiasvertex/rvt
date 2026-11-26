@@ -6,19 +6,19 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::brief::{self, Brief};
-use crate::cache::{self, Cache};
-use crate::changes::Change;
-use crate::inbox::{self, Inbox};
-use crate::item::{ItemRef, ItemState};
-use crate::live::{LiveSession, Status};
-use crate::ops::{self, Since};
-use crate::paths::tilde;
-use crate::respond::{self, Evaluation};
-use crate::search::{self, Hit};
-use crate::store::{self, ClaudeSession, FrozenSession, Handoff, Note, Project, State};
 use crate::tmux::Tmux;
-use crate::wait::{Condition, parse_when};
+use ctx_core::brief::{self, Brief};
+use ctx_core::cache::{self, Cache};
+use ctx_core::changes::Change;
+use ctx_core::inbox::{self, Inbox};
+use ctx_core::item::{ItemRef, ItemState};
+use ctx_core::live::{LiveSession, Status};
+use ctx_core::ops::{self, Since};
+use ctx_core::paths::tilde;
+use ctx_core::respond::{self, Evaluation};
+use ctx_core::search::{self, Hit};
+use ctx_core::store::{self, ClaudeSession, FrozenSession, Handoff, Note, Project, State};
+use ctx_core::wait::{Condition, parse_when};
 
 /// A single-line text field.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -493,7 +493,7 @@ impl App {
         if self.clear_met_waits() {
             self.projects = store::list();
         }
-        self.live = crate::live::sessions(&ops::claude_config_dirs(
+        self.live = ctx_core::live::sessions(&ops::claude_config_dirs(
             self.claude_config.clone(),
             &self.projects,
         ));
@@ -562,7 +562,7 @@ impl App {
                 continue;
             };
             let events = store::events(&project.slug);
-            if crate::wait::check(wait, &self.cache.items, &events, now).is_some() {
+            if ctx_core::wait::check(wait, &self.cache.items, &events, now).is_some() {
                 changed |= ops::evaluate(&Tmux, &project.slug).is_some();
             }
         }
@@ -960,7 +960,7 @@ impl App {
     }
 
     pub fn all_items(&self) -> Vec<ItemRef> {
-        crate::refresh::wanted(&self.projects, None)
+        ctx_core::refresh::wanted(&self.projects, None)
     }
 
     /// Keys that act on one project, from the home screen or the project screen.
@@ -1733,7 +1733,7 @@ impl App {
     }
 
     pub fn start_capture(&mut self, slug: String, body: String) {
-        let title = crate::item::snippet(&body)
+        let title = ctx_core::item::snippet(&body)
             .chars()
             .take(60)
             .collect::<String>();
@@ -1861,7 +1861,7 @@ fn new_project_key(mut form: NewProjectForm, key: KeyEvent) -> (Option<Modal>, V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wait::{Cleared, Wait};
+    use ctx_core::wait::{Cleared, Wait};
 
     fn project(name: &str, state: State) -> Project {
         Project {

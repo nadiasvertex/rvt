@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 use forge::exec;
 
-use crate::store::{Pane, Project, Window};
+use ctx_core::store::{Pane, Project, Window};
 
 /// The session that shows the home screen, used when the current session closes.
 pub const HOME_SESSION: &str = "ctx";
@@ -465,7 +465,7 @@ run-shell -b "{ctx} watch --daemon"
 /// The tmux front end: each project's workspace is a tmux session and each terminal a pane.
 pub struct Tmux;
 
-impl crate::terminals::Terminals for Tmux {
+impl ctx_core::terminals::Terminals for Tmux {
     fn current_workspace(&self) -> Option<String> {
         current_session()
     }

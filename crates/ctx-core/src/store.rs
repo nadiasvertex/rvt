@@ -666,7 +666,7 @@ pub fn commit(message: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use std::sync::{Mutex, MutexGuard};
 

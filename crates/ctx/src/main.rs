@@ -1,22 +1,6 @@
 mod app;
-mod brief;
-mod cache;
-mod changes;
-mod config;
-mod inbox;
-mod item;
-mod live;
-mod ops;
-mod paths;
-mod refresh;
-mod respond;
-mod search;
-mod store;
-mod terminals;
 mod tmux;
 mod ui;
-mod wait;
-mod watch;
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
@@ -30,6 +14,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use ctx_core::{
+    brief, cache, config, inbox, item, ops, refresh, respond, search, store, wait, watch,
+};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
