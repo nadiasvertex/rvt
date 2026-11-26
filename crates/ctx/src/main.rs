@@ -7,10 +7,12 @@ mod inbox;
 mod item;
 mod live;
 mod ops;
+mod paths;
 mod refresh;
 mod respond;
 mod search;
 mod store;
+mod terminals;
 mod tmux;
 mod ui;
 mod wait;
@@ -35,6 +37,7 @@ use app::{App, Command, HomeRow, Modal, Screen};
 use config::Config;
 use item::{ItemRef, ParseContext};
 use store::{Handoff, State};
+use tmux::Tmux;
 
 const USAGE: &str = "ctx: switch between projects without losing your place
 
@@ -112,14 +115,14 @@ fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
 fn project_arg(args: &mut Vec<String>) -> Result<String> {
     let projects = store::list();
     let name = take_value(args, "--project").or_else(|| (!args.is_empty()).then(|| args.join(" ")));
-    ops::resolve(&projects, name.as_deref())
+    ops::resolve(&Tmux, &projects, name.as_deref())
 }
 
 /// The project named by `--project`, or the current one.
 fn flag_project(args: &mut Vec<String>) -> Result<String> {
     let projects = store::list();
     let name = take_value(args, "--project");
-    ops::resolve(&projects, name.as_deref())
+    ops::resolve(&Tmux, &projects, name.as_deref())
 }
 
 fn run(mut args: Vec<String>) -> Result<i32> {
@@ -134,7 +137,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
     }
     if command.as_deref() == Some("event") {
         // Hooks must never fail Claude, whatever the config says.
-        let _ = watch::event(args.first().map(String::as_str).unwrap_or_default());
+        let _ = watch::event(&Tmux, args.first().map(String::as_str).unwrap_or_default());
         return Ok(0);
     }
     if command.as_deref() == Some("status") {
@@ -153,7 +156,12 @@ fn run(mut args: Vec<String>) -> Result<i32> {
         Some("sw" | "switch") => {
             let projects = store::list();
             let slug = store::find(&projects, &args.join(" "))?;
-            ops::switch(&cfg, &slug, ops::current_project(&projects).as_deref())?;
+            ops::switch(
+                &cfg,
+                &Tmux,
+                &slug,
+                ops::current_project(&Tmux, &projects).as_deref(),
+            )?;
             Ok(0)
         }
         Some("freeze") => cmd_freeze(&cfg, args),
@@ -180,9 +188,9 @@ fn run(mut args: Vec<String>) -> Result<i32> {
         Some("wait") => cmd_wait(args),
         Some("note") => {
             let slug = flag_project(&mut args)?;
-            let path = new_note(&slug, &args.join(" "))?;
+            let path = ops::new_note(&slug, &args.join(" "))?;
             edit(&path)?;
-            finish_note(&slug, &path);
+            ops::finish_note(&slug, &path);
             Ok(0)
         }
         Some("clip") => cmd_clip(args),
@@ -214,7 +222,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             let scope = if all {
                 None
             } else {
-                ops::current_project(&projects)
+                ops::current_project(&Tmux, &projects)
             };
             for hit in search::search(&args.join(" "), scope.as_deref(), 50)? {
                 let snippet = hit
@@ -232,12 +240,12 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             if args.first().map(String::as_str) == Some("--") {
                 args.remove(0);
             }
-            watch::run_command(&args, set_wait)
+            watch::run_command(&Tmux, &args, set_wait)
         }
         Some("watch") => {
             let daemon = take_flag(&mut args, "--daemon");
             let once = take_flag(&mut args, "--once");
-            watch::run(&cfg, daemon, once)?;
+            watch::run(&cfg, &Tmux, daemon, once)?;
             Ok(0)
         }
         Some("refresh") => {
@@ -265,7 +273,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                 eprintln!("failed: {key}: {e}");
             }
             for p in store::list() {
-                ops::evaluate(&p.slug);
+                ops::evaluate(&Tmux, &p.slug);
             }
             Ok(0)
         }
@@ -335,8 +343,9 @@ fn cmd_new(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
         let projects = store::list();
         ops::switch(
             cfg,
+            &Tmux,
             &project.slug,
-            ops::current_project(&projects).as_deref(),
+            ops::current_project(&Tmux, &projects).as_deref(),
         )?;
     }
     Ok(0)
@@ -441,7 +450,7 @@ fn cmd_freeze(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
         Some(text) => {
             let words: Vec<String> = text.split_whitespace().map(str::to_string).collect();
             Some(
-                wait::parse_shell(&words, |arg| resolve_item(&project, arg))
+                wait::parse_shell(&words, |arg| ops::find_item(&project, arg))
                     .map_err(anyhow::Error::msg)?
                     .starting_now(&cache::load().items),
             )
@@ -459,12 +468,11 @@ fn cmd_freeze(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
         next,
         waiting,
     };
-    ops::freeze(cfg, &slug, handoff, condition, close)?;
+    ops::freeze(cfg, &Tmux, &slug, handoff, condition, close)?;
     println!("{slug} is frozen");
     Ok(0)
 }
 
-/// Finds a project item by its label, key, or the number in it, for `ctx wait`.
 fn cmd_freeze_claude(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
     let note = take_value(&mut args, "--note").unwrap_or_default();
     let slug = flag_project(&mut args)?;
@@ -472,28 +480,7 @@ fn cmd_freeze_claude(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
         bail!("ctx freeze-claude needs a session ID or name");
     };
     let project = store::load(&slug)?;
-    let live = live::sessions(&ops::claude_config_dirs(
-        cfg.claude.config_path(),
-        std::slice::from_ref(&project),
-    ));
-    let matches: Vec<&store::ClaudeSession> = project
-        .claude_sessions
-        .iter()
-        .filter(|s| {
-            s.id.starts_with(&query)
-                || s.name.as_deref() == Some(query.as_str())
-                || live.get(&s.id).and_then(|l| l.name.as_deref()) == Some(query.as_str())
-        })
-        .collect();
-    let session = match matches.as_slice() {
-        [one] => (*one).clone(),
-        [] => bail!("{} has no Claude session matching {query}", project.name),
-        _ => bail!(
-            "{query} matches more than one Claude session in {}",
-            project.name
-        ),
-    };
-    let running = live.get(&session.id).cloned();
+    let (session, running) = ops::find_claude(cfg, &project, &query)?;
     let frozen = ops::mark_claude_frozen(
         &slug,
         &session.id,
@@ -501,38 +488,22 @@ fn cmd_freeze_claude(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
         running.as_ref().and_then(|l| l.name.clone()),
     )?;
     if let Some(running) = running {
-        ops::end_claude(&running)?;
+        ops::end_claude(&Tmux, &running)?;
     }
     println!("{} is frozen; ctx open {slug} lists it", frozen.label());
     Ok(0)
 }
 
-fn resolve_item(project: &store::Project, arg: &str) -> Option<(String, String)> {
-    let arg = arg.trim().to_lowercase();
-    let digits: String = arg.chars().filter(|c| c.is_ascii_digit()).collect();
-    project
-        .refs()
-        .find(|r| {
-            let label = r.label().to_lowercase();
-            label == arg
-                || r.key().to_lowercase() == arg
-                || (!digits.is_empty()
-                    && label.ends_with(&digits)
-                    && label.contains(arg.trim_start_matches(['#', '!'])))
-        })
-        .map(|r| (r.key(), r.label()))
-}
-
 fn cmd_wait(mut args: Vec<String>) -> Result<i32> {
     let slug = flag_project(&mut args)?;
     if take_flag(&mut args, "--clear") {
-        ops::set_wait(&slug, None)?;
+        ops::set_wait(&Tmux, &slug, None)?;
         println!("{slug} no longer waits");
         return Ok(0);
     }
     let project = store::load(&slug)?;
-    let mut condition =
-        wait::parse_shell(&args, |arg| resolve_item(&project, arg)).map_err(anyhow::Error::msg)?;
+    let mut condition = wait::parse_shell(&args, |arg| ops::find_item(&project, arg))
+        .map_err(anyhow::Error::msg)?;
     condition = condition.starting_now(&cache::load().items);
     if let wait::Condition::Claude { pane } = &mut condition {
         *pane = std::env::var("TMUX_PANE")
@@ -540,14 +511,14 @@ fn cmd_wait(mut args: Vec<String>) -> Result<i32> {
             .filter(|_| !take_flag(&mut args, "--any"));
     }
     let described = condition.describe();
-    ops::set_wait(&slug, Some(condition))?;
+    ops::set_wait(&Tmux, &slug, Some(condition))?;
     println!("{slug} waits on {described}");
     Ok(0)
 }
 
 fn cmd_list() -> Result<i32> {
     let projects = store::list();
-    let current = ops::current_project(&projects);
+    let current = ops::current_project(&Tmux, &projects);
     for state in [State::Live, State::Frozen, State::Done] {
         let group: Vec<_> = projects.iter().filter(|p| p.state == state).collect();
         if group.is_empty() {
@@ -743,7 +714,7 @@ fn cmd_update(cfg: &Config, args: Vec<String>) -> Result<i32> {
                 if !unknown.is_empty() {
                     refresh::fetch(cfg, &unknown, &|_| {});
                 }
-                let current = ops::current_project(&projects);
+                let current = ops::current_project(&Tmux, &projects);
                 found =
                     ops::projects_for(&projects, &items, &cache::load().items, current.as_deref());
             }
@@ -793,36 +764,6 @@ fn cmd_skill(cfg: &Config, mut args: Vec<String>) -> Result<i32> {
     store::write_atomic(&path, SKILL.as_bytes())?;
     println!("wrote {}", path.display());
     Ok(0)
-}
-
-fn new_note(slug: &str, title: &str) -> Result<PathBuf> {
-    let path = store::new_note_path(
-        slug,
-        if title.trim().is_empty() {
-            "note"
-        } else {
-            title
-        },
-    );
-    let note = store::Note {
-        path: path.clone(),
-        title: title.trim().to_string(),
-        source: "local".into(),
-        link: String::new(),
-        captured: Utc::now(),
-        body: String::new(),
-    };
-    store::write_atomic(&path, store::note_text(&note).as_bytes())?;
-    Ok(path)
-}
-
-/// Removes a note left empty, and indexes the rest.
-fn finish_note(slug: &str, path: &Path) {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    if store::parse_note(path, &text).body.trim().is_empty() {
-        let _ = std::fs::remove_file(path);
-    }
-    ops::reindex_project(slug);
 }
 
 fn edit(path: &Path) -> Result<()> {
@@ -908,7 +849,7 @@ const RELOAD: Duration = Duration::from_secs(2);
 fn tui(cfg: Config, start: Start) -> Result<i32> {
     let cfg = Arc::new(cfg);
     let projects = store::list();
-    let current = ops::current_project(&projects);
+    let current = ops::current_project(&Tmux, &projects);
     let popup = matches!(start, Start::Popup);
     let mut app = App::new(current.clone(), popup);
     app.close_default = cfg.tmux.close_on_freeze;
@@ -971,7 +912,7 @@ fn tui(cfg: Config, start: Start) -> Result<i32> {
     ratatui::restore();
     forge::exec::kill_children();
     if let Some(slug) = app_attach(&app) {
-        ops::switch(&cfg, &slug, None)?;
+        ops::switch(&cfg, &Tmux, &slug, None)?;
     }
     result.map(|_| 0)
 }
@@ -1040,7 +981,7 @@ fn claude_window(
         tmux::new_window(&project.session, dir, "claude", command)?;
     }
     if app.current.as_deref() != Some(project.slug.as_str()) {
-        ops::switch(cfg, &project.slug, app.current.as_deref())?;
+        ops::switch(cfg, &Tmux, &project.slug, app.current.as_deref())?;
         app.switched(&project.slug);
     }
     Ok(())
@@ -1258,7 +1199,7 @@ fn run_command(
                 app.quit = true;
                 return Ok(());
             }
-            ops::switch(cfg, &slug, app.current.as_deref())?;
+            ops::switch(cfg, &Tmux, &slug, app.current.as_deref())?;
             app.switched(&slug);
         }
         Command::OpenUrl(url) => {
@@ -1271,9 +1212,9 @@ fn run_command(
             }
         }
         Command::NewNote(slug) => {
-            let path = new_note(&slug, "")?;
+            let path = ops::new_note(&slug, "")?;
             let result = suspended(terminal, || edit(&path));
-            finish_note(&slug, &path);
+            ops::finish_note(&slug, &path);
             result?;
         }
         Command::Freeze {
@@ -1282,7 +1223,7 @@ fn run_command(
             condition,
             close,
         } => {
-            ops::freeze(cfg, &slug, handoff, condition, close)?;
+            ops::freeze(cfg, &Tmux, &slug, handoff, condition, close)?;
             app.flash(format!("froze {slug}"));
             if matches!(&app.screen, Screen::Project(s) if *s == slug) {
                 app.screen = Screen::Home;
@@ -1305,7 +1246,7 @@ fn run_command(
         }
         Command::SetWait(slug, condition) => {
             let described = condition.as_ref().map(|c| c.describe());
-            ops::set_wait(&slug, condition)?;
+            ops::set_wait(&Tmux, &slug, condition)?;
             match described {
                 Some(d) => app.flash(format!("{slug} waits on {d}")),
                 None => app.flash(format!("{slug} no longer waits")),
@@ -1322,7 +1263,7 @@ fn run_command(
             if let Some(item) = item {
                 app.flash(format!("created {} with {}", project.name, item.label()));
             } else if tmux::inside() {
-                ops::switch(cfg, &project.slug, app.current.as_deref())?;
+                ops::switch(cfg, &Tmux, &project.slug, app.current.as_deref())?;
                 app.switched(&project.slug);
             } else {
                 app.open_project(&project.slug);
@@ -1430,7 +1371,7 @@ fn run_command(
                     app.flash(format!("freezing {label}: ending Claude"));
                     let tx = tx.clone();
                     thread::spawn(move || {
-                        let result = ops::end_claude(&live).map_err(|e| format!("{e:#}"));
+                        let result = ops::end_claude(&Tmux, &live).map_err(|e| format!("{e:#}"));
                         let _ = tx.send(Msg::ClaudeEnded(label, result));
                     });
                 }

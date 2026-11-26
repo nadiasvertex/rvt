@@ -462,6 +462,70 @@ run-shell -b "{ctx} watch --daemon"
     )
 }
 
+/// The tmux front end: each project's workspace is a tmux session and each terminal a pane.
+pub struct Tmux;
+
+impl crate::terminals::Terminals for Tmux {
+    fn current_workspace(&self) -> Option<String> {
+        current_session()
+    }
+
+    fn current_terminal(&self) -> Option<String> {
+        std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())
+    }
+
+    fn is_open(&self, project: &Project) -> bool {
+        has_session(&project.session)
+    }
+
+    fn open(&self, project: &Project) -> Result<()> {
+        ensure_session(project).map(|_| ())
+    }
+
+    fn show(&self, project: &Project, note: Option<&str>) -> Result<()> {
+        let was_inside = inside();
+        switch_to(&project.session)?;
+        if let Some(note) = note.filter(|_| was_inside) {
+            message(note);
+        }
+        Ok(())
+    }
+
+    fn show_home(&self) -> Result<()> {
+        ensure_home_session()?;
+        switch_to(HOME_SESSION)
+    }
+
+    fn close(&self, project: &Project) -> Result<()> {
+        kill_session(&project.session)
+    }
+
+    fn layout(&self, project: &Project) -> Option<Vec<Window>> {
+        if !has_session(&project.session) {
+            return None;
+        }
+        capture_layout(&project.session)
+            .ok()
+            .filter(|layout| !layout.is_empty())
+    }
+
+    fn message(&self, text: &str) {
+        message(text);
+    }
+
+    fn type_line(&self, terminal: &str, text: &str) -> Result<()> {
+        type_line(terminal, text)
+    }
+
+    fn workspace_of(&self, terminal: &str) -> Option<String> {
+        pane_session(terminal)
+    }
+
+    fn running(&self) -> bool {
+        server_running()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

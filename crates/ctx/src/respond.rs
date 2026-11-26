@@ -497,7 +497,7 @@ pub fn run(
         } else {
             format!("{} threads", threads.len())
         },
-        crate::app::tilde(&dir)
+        crate::paths::tilde(&dir)
     ));
     let text = prompt(&PromptInput {
         item: &pr,

@@ -13,9 +13,11 @@ use crate::inbox::{self, Inbox};
 use crate::item::{ItemRef, ItemState};
 use crate::live::{LiveSession, Status};
 use crate::ops::{self, Since};
+use crate::paths::tilde;
 use crate::respond::{self, Evaluation};
 use crate::search::{self, Hit};
 use crate::store::{self, ClaudeSession, FrozenSession, Handoff, Note, Project, State};
+use crate::tmux::Tmux;
 use crate::wait::{Condition, parse_when};
 
 /// A single-line text field.
@@ -561,7 +563,7 @@ impl App {
             };
             let events = store::events(&project.slug);
             if crate::wait::check(wait, &self.cache.items, &events, now).is_some() {
-                changed |= ops::evaluate(&project.slug).is_some();
+                changed |= ops::evaluate(&Tmux, &project.slug).is_some();
             }
         }
         changed
@@ -1854,15 +1856,6 @@ fn new_project_key(mut form: NewProjectForm, key: KeyEvent) -> (Option<Modal>, V
         }
     }
     (Some(Modal::NewProject(form)), Vec::new())
-}
-
-/// The path with the home directory written as `~`.
-pub fn tilde(path: &std::path::Path) -> String {
-    match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(PathBuf::from)) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
-    }
 }
 
 #[cfg(test)]

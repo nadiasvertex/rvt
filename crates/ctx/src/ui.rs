@@ -1150,7 +1150,7 @@ fn evaluation_notes(e: &Evaluation, state: Option<&ItemState>, width: usize) -> 
 }
 
 fn app_tilde(path: &std::path::Path) -> String {
-    crate::app::tilde(path)
+    crate::paths::tilde(path)
 }
 
 fn response_row(e: &Evaluation, i: usize, cursor: usize, width: usize) -> Line<'static> {
