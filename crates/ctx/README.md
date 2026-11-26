@@ -9,9 +9,13 @@ themselves, so projects that are ready to work on come to the top.
 ctx is becoming a desktop app with its own terminals. The tmux interface is gone. On macOS,
 `ctx` with no arguments opens the app. It shows the projects in a sidebar grouped as Live, Ready,
 Waiting and Unfiled. Drag a project to reorder it within its group. With no project selected,
-the app shows the home view. A selected project shows a terminal running your login shell and
-the project panel, which ⌘I hides. The panel has the handoff, what changed since you left,
-items, Claude sessions and the journal. Until the app has workspaces and actions, ctx 0.3.0
+the app shows the home view. A selected project shows its workspace, a set of tabs that keep
+running when you switch projects, and the project panel, which ⌘I hides. A workspace opens with
+one tab per window of the project's saved layout, or one shell in the project directory. ⌘T opens
+a terminal, ⌘⇧T a Claude tab, ⌘W closes a tab, and ⌘⇧[ and ⌘⇧] move between tabs. A tab is
+named after its program and directory; double-click it to rename it, and clear the name to go
+back. The panel has the handoff, what changed since you left, items, Claude sessions, notes and
+the journal. A note opens in a tab as rendered Markdown. Until the app has its actions, ctx 0.3.0
 stays the version for daily use. Both
 versions read and write the same project files.
 
@@ -129,6 +133,7 @@ item, to each project the entry went to. `--message -` reads the summary from st
   inbox.json          your PRs, MRs and work items, for the app's Unfiled section
   index.db            the search index; ctx reindex rebuilds it
   order               the sidebar order, one project slug per line
+  terminal-id         the last terminal number the app handed out
 ```
 
 The `projects` directory is a git repository, and ctx commits after each freeze and state change.

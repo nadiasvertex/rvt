@@ -15,7 +15,7 @@ use ctx_core::item::{ItemRef, ItemState};
 use ctx_core::live::{self, LiveSession};
 use ctx_core::ops::{self, Since};
 use ctx_core::order::{self, Group};
-use ctx_core::store::{self, ClaudeSession, Project, State};
+use ctx_core::store::{self, ClaudeSession, Note, Project, State};
 
 pub struct JournalEntry {
     pub time: Option<NaiveDateTime>,
@@ -35,6 +35,8 @@ pub struct Snapshot {
     pub journals: HashMap<String, Vec<JournalEntry>>,
     /// Each project's Claude sessions that run now.
     pub claude: HashMap<String, Vec<(ClaudeSession, LiveSession)>>,
+    /// Each project's notes, newest first.
+    pub notes: HashMap<String, Vec<Note>>,
 }
 
 impl Snapshot {
@@ -49,9 +51,11 @@ impl Snapshot {
         let mut since = HashMap::new();
         let mut journals = HashMap::new();
         let mut claude = HashMap::new();
+        let mut all_notes = HashMap::new();
         for p in projects.iter().filter(|p| p.state != State::Done) {
             let notes = store::notes(&p.slug);
             since.insert(p.slug.clone(), ops::since(p, &cache.items, &notes));
+            all_notes.insert(p.slug.clone(), notes);
             journals.insert(p.slug.clone(), journal(&store::journal(&p.slug)));
             let live: Vec<_> = p
                 .claude_sessions
@@ -68,6 +72,7 @@ impl Snapshot {
             since,
             journals,
             claude,
+            notes: all_notes,
         }
     }
 

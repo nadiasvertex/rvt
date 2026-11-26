@@ -15,7 +15,18 @@ use gpui_kit::*;
 
 use super::keys::{self, Mods};
 use super::palette;
-use super::pty::{GridSize, Pty};
+use super::pty::{Foreground, GridSize, Pty};
+
+/// How often the view asks which program runs in the foreground, for the tab's name.
+const FOREGROUND_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// What a terminal tells the tab that holds it.
+pub enum TerminalEvent {
+    /// The program ended.
+    Exited,
+    /// The foreground program or its directory changed.
+    Foreground,
+}
 
 const FONT_FAMILY: &str = "Menlo";
 const FONT_SIZE: f32 = 13.0;
@@ -44,12 +55,16 @@ pub struct TerminalView {
     pty: Rc<RefCell<Pty>>,
     focus: FocusHandle,
     metrics: Rc<RefCell<Metrics>>,
-    title: String,
+    foreground: Option<Foreground>,
+    exited: bool,
     /// Scrolled distance not yet turned into whole lines.
     scroll_lines: f32,
     selecting: bool,
     _events: Task<()>,
+    _foreground: Task<()>,
 }
+
+impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl TerminalView {
     pub fn new(
@@ -67,7 +82,6 @@ impl TerminalView {
             .unwrap_or(px(FONT_SIZE * 0.6));
         let line_height = px((FONT_SIZE * LINE_HEIGHT).round());
         let focus = cx.focus_handle();
-        focus.focus(window, cx);
         let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             while let Ok(event) = events.recv().await {
                 if this
@@ -78,6 +92,18 @@ impl TerminalView {
                 }
             }
         });
+        let foreground = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                if this
+                    .update(cx, |view, cx| view.check_foreground(cx))
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor().timer(FOREGROUND_EVERY).await;
+            }
+        });
+        let first = pty.foreground();
         TerminalView {
             pty: Rc::new(RefCell::new(pty)),
             focus,
@@ -86,16 +112,29 @@ impl TerminalView {
                 cell_width,
                 line_height,
             })),
-            title: "ctx".into(),
+            foreground: first,
+            exited: false,
             scroll_lines: 0.0,
             selecting: false,
             _events: task,
+            _foreground: foreground,
         }
     }
 
-    /// The title the program set, or `ctx`.
-    pub fn title(&self) -> &str {
-        &self.title
+    /// The program in the foreground and its directory, as last seen.
+    pub fn foreground(&self) -> Option<&Foreground> {
+        self.foreground.as_ref()
+    }
+
+    fn check_foreground(&mut self, cx: &mut Context<Self>) {
+        if self.exited {
+            return;
+        }
+        let now = self.pty.borrow().foreground();
+        if now.is_some() && now != self.foreground {
+            self.foreground = now;
+            cx.emit(TerminalEvent::Foreground);
+        }
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -106,14 +145,8 @@ impl TerminalView {
         let pty = self.pty.borrow();
         match event {
             Event::Wakeup | Event::CursorBlinkingChange | Event::MouseCursorDirty => cx.notify(),
-            Event::Title(title) => {
-                self.title = title;
-                cx.notify();
-            }
-            Event::ResetTitle => {
-                self.title = "ctx".into();
-                cx.notify();
-            }
+            // Tabs are named after their program and directory, not the title a program sets.
+            Event::Title(_) | Event::ResetTitle => {}
             Event::PtyWrite(text) => pty.write(text.into_bytes()),
             Event::ClipboardStore(_, text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text))
@@ -139,8 +172,12 @@ impl TerminalView {
                 pty.write(reply(rgb).into_bytes());
             }
             Event::TextAreaSizeRequest(reply) => pty.write(reply(pty.window_size()).into_bytes()),
-            // One terminal per window for now: the window goes when its program exits.
-            Event::Exit | Event::ChildExit(_) => cx.quit(),
+            Event::Exit | Event::ChildExit(_) => {
+                if !self.exited {
+                    self.exited = true;
+                    cx.emit(TerminalEvent::Exited);
+                }
+            }
             Event::Bell => {}
         }
     }

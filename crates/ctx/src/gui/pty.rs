@@ -2,6 +2,8 @@
 //! code, so tests can run a terminal without a window.
 
 use std::collections::HashMap;
+use std::ffi::CStr;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -51,11 +53,21 @@ pub struct Launch {
     pub env: HashMap<String, String>,
 }
 
+/// The program in the terminal's foreground and its working directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Foreground {
+    pub program: String,
+    pub dir: Option<PathBuf>,
+}
+
 pub struct Pty {
     pub term: Arc<FairMutex<Term<Listener>>>,
     notifier: Notifier,
     size: GridSize,
     cell: (u16, u16),
+    /// A copy of the PTY's controlling side, to ask which process group is in the foreground.
+    controller: Option<OwnedFd>,
+    child: i32,
 }
 
 impl Pty {
@@ -83,6 +95,12 @@ impl Pty {
             env,
         };
         let pty = tty::new(&options, window_size(size, cell), 0).context("could not open a PTY")?;
+        let child = pty.child().id() as i32;
+        // SAFETY: dup returns a new descriptor that nothing else owns, or -1.
+        let controller = match unsafe { libc::dup(pty.file().as_raw_fd()) } {
+            -1 => None,
+            fd => Some(unsafe { OwnedFd::from_raw_fd(fd) }),
+        };
         let term = Arc::new(FairMutex::new(Term::new(
             Config::default(),
             &size,
@@ -98,6 +116,8 @@ impl Pty {
                 notifier,
                 size,
                 cell,
+                controller,
+                child,
             },
             rx,
         ))
@@ -128,6 +148,23 @@ impl Pty {
         self.term.lock().scroll_display(Scroll::Bottom);
     }
 
+    /// The foreground program and its directory, or the started program's when the PTY has no
+    /// foreground process group.
+    pub fn foreground(&self) -> Option<Foreground> {
+        let group = self
+            .controller
+            .as_ref()
+            // SAFETY: the descriptor stays open while `self` lives.
+            .map(|fd| unsafe { libc::tcgetpgrp(fd.as_raw_fd()) })
+            .filter(|&g| g > 0)
+            .unwrap_or(self.child);
+        let program = process_name(group).or_else(|| process_name(self.child))?;
+        Some(Foreground {
+            program,
+            dir: process_dir(group).or_else(|| process_dir(self.child)),
+        })
+    }
+
     /// The window size alacritty reports to programs that ask for it.
     pub fn window_size(&self) -> WindowSize {
         window_size(self.size, self.cell)
@@ -138,6 +175,35 @@ impl Drop for Pty {
     fn drop(&mut self) {
         let _ = self.notifier.0.send(Msg::Shutdown);
     }
+}
+
+fn process_name(pid: i32) -> Option<String> {
+    let mut buffer = [0u8; 256];
+    // SAFETY: proc_name writes at most `buffer.len()` bytes and returns how many it wrote.
+    let n = unsafe { libc::proc_name(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buffer[..n as usize]).into_owned())
+}
+
+fn process_dir(pid: i32) -> Option<PathBuf> {
+    // SAFETY: the struct is plain data, and proc_pidinfo fills at most its size.
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&mut info as *mut libc::proc_vnodepathinfo).cast(),
+            size,
+        )
+    };
+    if n != size {
+        return None;
+    }
+    // SAFETY: the path is a NUL-terminated C string inside the fixed-size buffer.
+    let path = unsafe { CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast()) };
+    let path = path.to_str().ok()?;
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 fn window_size(size: GridSize, cell: (u16, u16)) -> WindowSize {
@@ -242,6 +308,27 @@ mod tests {
             started.elapsed(),
             screen_text(&pty.term.lock()).join("\n")
         );
+    }
+
+    #[test]
+    fn the_foreground_program_and_its_directory_are_known() {
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let launch = Launch {
+            dir: Some(dir.clone()),
+            ..sh("echo ready; exec sleep 5")
+        };
+        let (pty, rx) = Pty::spawn(&launch, SIZE, (8, 16)).unwrap();
+        wait_for(&rx, &pty, |s| s[0] == "ready");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let fg = pty.foreground();
+            if fg.as_ref().is_some_and(|f| f.program == "sleep") {
+                assert_eq!(fg.unwrap().dir.as_deref(), Some(dir.as_path()));
+                return;
+            }
+            assert!(Instant::now() < deadline, "foreground: {fg:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

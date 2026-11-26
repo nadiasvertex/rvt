@@ -1,6 +1,7 @@
 //! The app's window: a header, the project sidebar, the home view or the selected project's
-//! terminal, and the project panel.
+//! workspace, and the project panel.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ use gpui_kit::*;
 use super::snapshot::{JournalEntry, Snapshot, fingerprint};
 use super::text;
 use super::theme::*;
-use super::view::TerminalView;
+use super::workspace::{ClaudeLaunch, Workspace, WorkspaceEvent};
 
 actions!(ctx, [TogglePanel]);
 
@@ -61,21 +62,20 @@ pub struct Root {
     panel_open: bool,
     journal_open: bool,
     drop_at: Option<DropAt>,
-    terminal: Entity<TerminalView>,
+    /// Each project's workspace, opened the first time the project is shown.
+    workspaces: HashMap<String, Entity<Workspace>>,
+    claude: ClaudeLaunch,
     focus: FocusHandle,
     shown_title: String,
     _reload: Task<()>,
+    _workspace_events: Vec<Subscription>,
 }
 
 impl Root {
-    pub fn new(
-        config: Option<Config>,
-        terminal: Entity<TerminalView>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(config: Option<Config>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let claude = ClaudeLaunch::from_config(config.as_ref());
         let config = Arc::new(config);
-        let reload = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        let reload = cx.spawn_in(window, async move |this, cx| {
             let mut last = None;
             let mut loaded = Instant::now();
             loop {
@@ -87,8 +87,26 @@ impl Root {
                         .await;
                     last = Some(now);
                     loaded = Instant::now();
-                    let updated = this.update(cx, |root, cx| {
+                    let updated = this.update_in(cx, |root, window, cx| {
                         root.snapshot = snapshot;
+                        // A project selected before the store was read gets its workspace now.
+                        if root.workspace_entity().is_none() {
+                            root.open_workspace(window, cx);
+                            // Debug builds can also open the project's newest note.
+                            if cfg!(debug_assertions)
+                                && std::env::var_os("CTX_GUI_NOTE").is_some()
+                            {
+                                let note = root
+                                    .selected
+                                    .as_ref()
+                                    .and_then(|s| root.snapshot.notes.get(s))
+                                    .and_then(|n| n.first())
+                                    .map(|n| n.path.clone());
+                                if let Some(path) = note {
+                                    root.open_note(path, window, cx);
+                                }
+                            }
+                        }
                         cx.notify();
                     });
                     if updated.is_err() {
@@ -115,21 +133,54 @@ impl Root {
             panel_open: true,
             journal_open,
             drop_at: None,
-            terminal,
+            workspaces: HashMap::new(),
+            claude,
             focus,
             shown_title: String::new(),
             _reload: reload,
+            _workspace_events: Vec::new(),
         }
     }
 
     fn select(&mut self, slug: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.journal_open = false;
-        match &slug {
-            Some(_) => self.terminal.read(cx).focus_handle().focus(window, cx),
+        self.selected = slug;
+        self.open_workspace(window, cx);
+        match self.workspace_entity() {
+            Some(ws) => ws.read(cx).focus_target(cx).focus(window, cx),
             None => self.focus.focus(window, cx),
         }
-        self.selected = slug;
         cx.notify();
+    }
+
+    /// The selected project's workspace, if it is open.
+    fn workspace_entity(&self) -> Option<&Entity<Workspace>> {
+        self.selected.as_ref().and_then(|s| self.workspaces.get(s))
+    }
+
+    /// Opens the selected project's workspace unless it is open.
+    fn open_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
+        if self.workspaces.contains_key(&project.slug) {
+            return;
+        }
+        let claude = self.claude.clone();
+        let panel_open = self.panel_open;
+        let ws = cx.new(|cx| Workspace::new(&project, claude, panel_open, window, cx));
+        let events = cx.subscribe(&ws, |root, _, event, cx| match event {
+            WorkspaceEvent::TogglePanel => root.toggle_panel(cx),
+        });
+        self._workspace_events.push(events);
+        ws.read(cx).focus_target(cx).focus(window, cx);
+        self.workspaces.insert(project.slug, ws);
+    }
+
+    fn open_note(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ws) = self.workspace_entity().cloned() {
+            ws.update(cx, |ws, cx| ws.open_note(path, window, cx));
+        }
     }
 
     fn selected_project(&self) -> Option<&Project> {
@@ -638,68 +689,15 @@ impl Root {
             ))
     }
 
-    fn workspace(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = self.terminal.read(cx).title().to_string();
-        let panel_open = self.panel_open;
-        div()
-            .flex_1()
-            .min_w(px(0.0))
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(px(TABS_HEIGHT))
-                    .flex_none()
-                    .flex()
-                    .items_stretch()
-                    .bg(rgb(SURFACE))
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .px(px(14.0))
-                            .bg(rgb(BACKGROUND))
-                            .border_r_1()
-                            .border_color(rgb(BORDER))
-                            .border_b_2()
-                            .border_color(rgb(ACCENT))
-                            .text_size(px(12.5))
-                            .child(dot(FAINT))
-                            .child(title),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("panel-toggle")
-                            .my(px(6.0))
-                            .mx(px(8.0))
-                            .px(px(8.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(rgb(CONTROL_BORDER))
-                            .text_size(px(12.0))
-                            .cursor_pointer()
-                            .when(panel_open, |d| d.bg(rgb(SELECTED)).text_color(rgb(TEXT)))
-                            .when(!panel_open, |d| d.text_color(rgb(SECONDARY)))
-                            .hover(|s| s.bg(rgb(RAISED)))
-                            .on_click(cx.listener(|root, _, _, cx| root.toggle_panel(cx)))
-                            .child(if panel_open {
-                                "Hide panel ⌘I"
-                            } else {
-                                "Show panel ⌘I"
-                            }),
-                    ),
-            )
-            .child(div().flex_1().min_h(px(0.0)).child(self.terminal.clone()))
-    }
-
     fn toggle_panel(&mut self, cx: &mut Context<Self>) {
         self.panel_open = !self.panel_open;
+        let open = self.panel_open;
+        for ws in self.workspaces.values() {
+            ws.update(cx, |ws, cx| {
+                ws.panel_open = open;
+                cx.notify();
+            });
+        }
         cx.notify();
     }
 
@@ -919,6 +917,46 @@ impl Root {
             body = body.child(sessions);
         }
 
+        // Notes, which open in a tab.
+        if let Some(notes) = self.snapshot.notes.get(&p.slug).filter(|n| !n.is_empty()) {
+            let mut list = section("Notes").gap(px(2.0));
+            for (i, note) in notes.iter().enumerate() {
+                let path = note.path.clone();
+                list = list.child(
+                    div()
+                        .id(("note", i))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(RAISED)))
+                        .on_click(cx.listener(move |root, _, window, cx| {
+                            root.open_note(path.clone(), window, cx)
+                        }))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .truncate()
+                                .child(note.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(SECONDARY))
+                                .child(format!(
+                                    "{} · {}",
+                                    note.source,
+                                    text::ago(note.captured, now)
+                                )),
+                        ),
+                );
+            }
+            body = body.child(list);
+        }
+
         // The latest journal entries.
         let journal = self.snapshot.journals.get(&p.slug);
         if let Some(entries) = journal.filter(|e| !e.is_empty()) {
@@ -1062,9 +1100,14 @@ impl Render for Root {
             window.set_window_title(&title);
             self.shown_title = title.clone();
         }
-        let main = match self.selected_project() {
-            Some(_) => self.workspace(cx).into_any_element(),
-            None => self.home(now, cx).into_any_element(),
+        let main = match (self.selected_project(), self.workspace_entity()) {
+            (Some(_), Some(ws)) => div()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(ws.clone())
+                .into_any_element(),
+            (Some(_), None) => div().flex_1().into_any_element(),
+            (None, _) => self.home(now, cx).into_any_element(),
         };
         let panel = self
             .selected_project()
