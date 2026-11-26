@@ -15,9 +15,17 @@ one tab per window of the project's saved layout, or one shell in the project di
 a terminal, ⌘⇧T a Claude tab, ⌘W closes a tab, and ⌘⇧[ and ⌘⇧] move between tabs. A tab is
 named after its program and directory; double-click it to rename it, and clear the name to go
 back. The panel has the handoff, what changed since you left, items, Claude sessions, notes and
-the journal. A note opens in a tab as rendered Markdown. Until the app has its actions, ctx 0.3.0
-stays the version for daily use. Both
-versions read and write the same project files.
+the journal. A note opens in a tab as rendered Markdown.
+
+The panel's buttons freeze, thaw, set a wait on, or finish the project, and a ready project's card
+on the home view thaws it. Freezing opens a dialog where Claude drafts Doing, Next and what the
+project waits on from the journal, the items and the project's running Claude sessions. You can
+change all three, write them yourself, or freeze without waiting for the draft, and choose whether
+to close the project's tabs. "+ New project" or ⌘N makes a project. While the app runs, it
+refreshes items and clears wait conditions itself, unless a `ctx watch` from ctx 0.3.0 already
+runs. The app saves a workspace's layout when you leave or freeze the project, and only once you
+have opened, closed or renamed a tab, so looking at a project keeps the layout ctx 0.3.0 saved.
+Both versions read and write the same project files.
 
 ## Setup
 

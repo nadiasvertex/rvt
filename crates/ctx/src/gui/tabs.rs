@@ -96,7 +96,6 @@ pub struct Saved {
 
 /// The layout to save for a workspace's terminal tabs. A tab keeps its name only when the user
 /// set one.
-#[allow(dead_code)] // Saved by the freeze, which comes with the actions.
 pub fn save(tabs: &[Saved]) -> Vec<Window> {
     tabs.iter()
         .map(|t| Window {

@@ -128,6 +128,11 @@ impl Pty {
         self.notifier.notify(bytes);
     }
 
+    /// A handle that sends input to the program from any thread.
+    pub fn writer(&self) -> alacritty_terminal::event_loop::EventLoopSender {
+        self.notifier.0.clone()
+    }
+
     pub fn size(&self) -> GridSize {
         self.size
     }

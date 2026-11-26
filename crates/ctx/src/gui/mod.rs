@@ -1,6 +1,8 @@
 //! The ctx app: one window with the project sidebar, the home view, each project's workspace of
 //! tabs and the project panel.
 
+mod bridge;
+mod dialogs;
 mod keys;
 mod note;
 mod palette;
@@ -17,7 +19,7 @@ use anyhow::Result;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 
-use root::{Root, TogglePanel};
+use root::{NewProject, Root, TogglePanel};
 use workspace::{CloseTab, NewClaude, NewTerminal, NextTab, PreviousTab};
 
 actions!(ctx, [Quit]);
@@ -39,6 +41,7 @@ pub fn run() -> Result<i32> {
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-i", TogglePanel, None),
+            KeyBinding::new("cmd-n", NewProject, None),
             KeyBinding::new("cmd-t", NewTerminal, None),
             KeyBinding::new("cmd-shift-t", NewClaude, None),
             KeyBinding::new("cmd-w", CloseTab, None),
@@ -66,8 +69,11 @@ pub fn run() -> Result<i32> {
             ..Default::default()
         };
         let config = config.take().expect("the app starts once");
-        let opened =
-            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Root::new(config, window, cx)));
+        // The component library's root holds what its text inputs need.
+        let opened = gpui_kit::open_window(options, cx, |window, cx| {
+            let root = cx.new(|cx| Root::new(config, window, cx));
+            cx.new(|cx| gpui_kit::component::Root::new(root, window, cx))
+        });
         if let Err(e) = opened {
             eprintln!("ctx: could not open a window: {e:#}");
             cx.quit();

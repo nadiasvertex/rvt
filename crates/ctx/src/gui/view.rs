@@ -121,6 +121,10 @@ impl TerminalView {
         }
     }
 
+    pub fn writer(&self) -> alacritty_terminal::event_loop::EventLoopSender {
+        self.pty.borrow().writer()
+    }
+
     /// The program in the foreground and its directory, as last seen.
     pub fn foreground(&self) -> Option<&Foreground> {
         self.foreground.as_ref()

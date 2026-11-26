@@ -10,16 +10,22 @@ use ctx_core::config::Config;
 use ctx_core::item::{ItemRef, Tone};
 use ctx_core::live::Status;
 use ctx_core::order::{self, Group};
-use ctx_core::store::Project;
+use ctx_core::ops;
+use ctx_core::store::{Project, State};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use super::bridge::{self, Bridge, Command};
+use super::dialogs::{self, DialogEvent, FreezeDialog, NewProjectDialog, WaitDialog};
 use super::snapshot::{JournalEntry, Snapshot, fingerprint};
 use super::text;
 use super::theme::*;
 use super::workspace::{ClaudeLaunch, Workspace, WorkspaceEvent};
 
-actions!(ctx, [TogglePanel]);
+actions!(ctx, [TogglePanel, NewProject]);
+
+/// How long a message stays on screen.
+const TOAST_FOR: Duration = Duration::from_secs(6);
 
 /// How often the app reads Claude's session registry when nothing in the store changed.
 const CLAUDE_EVERY: Duration = Duration::from_secs(5);
@@ -65,9 +71,16 @@ pub struct Root {
     /// Each project's workspace, opened the first time the project is shown.
     workspaces: HashMap<String, Entity<Workspace>>,
     claude: ClaudeLaunch,
+    config: Arc<Option<Config>>,
+    bridge: Bridge,
+    /// Messages shown at the bottom right, newest last, with their numbers.
+    toasts: Vec<(u64, String)>,
+    next_toast: u64,
+    dialog: Option<(AnyView, Subscription)>,
     focus: FocusHandle,
     shown_title: String,
     _reload: Task<()>,
+    _commands: Task<()>,
     _workspace_events: Vec<Subscription>,
 }
 
@@ -75,7 +88,30 @@ impl Root {
     pub fn new(config: Option<Config>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let claude = ClaudeLaunch::from_config(config.as_ref());
         let config = Arc::new(config);
+        let (bridge, commands) = Bridge::new();
+        // The watcher refreshes items and clears wait conditions while the app runs, unless
+        // ctx 0.3.0's watcher already does.
+        if let Some(cfg) = config.as_ref().clone() {
+            let terminals = bridge.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = ctx_core::watch::run(&cfg, &terminals, true, false) {
+                    eprintln!("ctx: the watcher stopped: {e:#}");
+                }
+            });
+        }
+        let commands = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(command) = commands.recv().await {
+                if this
+                    .update_in(cx, |root, window, cx| root.apply(command, window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let reload_config = config.clone();
         let reload = cx.spawn_in(window, async move |this, cx| {
+            let config = reload_config;
             let mut last = None;
             let mut loaded = Instant::now();
             loop {
@@ -89,6 +125,7 @@ impl Root {
                     loaded = Instant::now();
                     let updated = this.update_in(cx, |root, window, cx| {
                         root.snapshot = snapshot;
+                        root.sync(cx);
                         // A project selected before the store was read gets its workspace now.
                         if root.workspace_entity().is_none() {
                             root.open_workspace(window, cx);
@@ -106,12 +143,26 @@ impl Root {
                                     root.open_note(path, window, cx);
                                 }
                             }
+                            // Debug builds can also open a dialog, to check how it looks.
+                            if cfg!(debug_assertions) {
+                                let slug = root.selected.clone().unwrap_or_default();
+                                match std::env::var("CTX_GUI_DIALOG").as_deref() {
+                                    Ok("freeze") => root.freeze(&slug, window, cx),
+                                    Ok("wait") => root.wait(&slug, window, cx),
+                                    Ok("new") => root.new_project(window, cx),
+                                    _ => {}
+                                }
+                            }
                         }
                         cx.notify();
                     });
                     if updated.is_err() {
                         break;
                     }
+                }
+                // Keeps the operations' copy of the window current, such as tab directories.
+                if this.update(cx, |root, cx| root.sync(cx)).is_err() {
+                    break;
                 }
                 cx.background_executor().timer(Duration::from_secs(1)).await;
             }
@@ -135,22 +186,202 @@ impl Root {
             drop_at: None,
             workspaces: HashMap::new(),
             claude,
+            config,
+            bridge,
+            toasts: Vec::new(),
+            next_toast: 0,
+            dialog: None,
             focus,
             shown_title: String::new(),
             _reload: reload,
+            _commands: commands,
             _workspace_events: Vec::new(),
         }
     }
 
     fn select(&mut self, slug: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.journal_open = false;
+        // Leaving a project records the visit, so "since you left" starts from now.
+        if let Some(from) = self.selected.clone().filter(|f| Some(f) != slug.as_ref()) {
+            self.sync(cx);
+            let bridge = self.bridge.clone();
+            cx.background_spawn(async move { ops::leave(&bridge, &from) })
+                .detach();
+        }
         self.selected = slug;
         self.open_workspace(window, cx);
         match self.workspace_entity() {
             Some(ws) => ws.read(cx).focus_target(cx).focus(window, cx),
             None => self.focus.focus(window, cx),
         }
+        self.sync(cx);
         cx.notify();
+    }
+
+    /// Gives ctx's operations a fresh copy of the window's state.
+    fn sync(&self, cx: &App) {
+        let mut state = bridge::State {
+            selected: self.selected.clone(),
+            focused: self
+                .workspace_entity()
+                .and_then(|ws| ws.read(cx).active_terminal()),
+            ..bridge::State::default()
+        };
+        for (slug, ws) in &self.workspaces {
+            let name = self
+                .snapshot
+                .project(slug)
+                .map(|p| p.workspace.clone())
+                .unwrap_or_else(|| slug.clone());
+            let (open, writers) = ws.read(cx).describe(&name, cx);
+            state.writers.extend(writers);
+            state.open.insert(slug.clone(), open);
+        }
+        self.bridge.set(state);
+    }
+
+    /// Carries out what an operation asked of the window.
+    fn apply(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        match command {
+            Command::Open(slug) => self.open_workspace_of(&slug, window, cx),
+            Command::Show { slug, note } => {
+                self.select(Some(slug), window, cx);
+                if let Some(note) = note {
+                    self.toast(note, cx);
+                }
+            }
+            Command::ShowHome => self.select(None, window, cx),
+            Command::Close(slug) => {
+                if self.selected.as_deref() == Some(slug.as_str()) {
+                    self.select(None, window, cx);
+                }
+                // Dropping the workspace ends its terminals.
+                self.workspaces.remove(&slug);
+                self.sync(cx);
+            }
+            Command::Message(text) => self.toast(text, cx),
+        }
+        cx.notify();
+    }
+
+    fn toast(&mut self, text: String, cx: &mut Context<Self>) {
+        let id = self.next_toast;
+        self.next_toast += 1;
+        self.toasts.push((id, text));
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(TOAST_FOR).await;
+            let _ = this.update(cx, |root, cx| {
+                root.toasts.retain(|(i, _)| *i != id);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Runs a ctx operation on a background thread and shows its error, if any.
+    fn run_op(
+        &mut self,
+        what: &'static str,
+        cx: &mut Context<Self>,
+        op: impl FnOnce(&Bridge) -> anyhow::Result<()> + Send + 'static,
+    ) {
+        let bridge = self.bridge.clone();
+        let task = cx.background_spawn(async move { op(&bridge) });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            if let Err(e) = task.await {
+                let _ = this.update(cx, |root, cx| {
+                    root.toast(format!("Could not {what}: {e:#}"), cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn show_dialog<V: Render + EventEmitter<DialogEvent>>(
+        &mut self,
+        dialog: Entity<V>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let events = cx.subscribe_in(&dialog, window, |root, _, event, window, cx| match event {
+            DialogEvent::Close => root.close_dialog(window, cx),
+            DialogEvent::Created(slug) => {
+                let slug = slug.clone();
+                root.close_dialog(window, cx);
+                root.select(Some(slug), window, cx);
+            }
+        });
+        self.dialog = Some((dialog.into(), events));
+        cx.notify();
+    }
+
+    fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dialog = None;
+        match self.workspace_entity() {
+            Some(ws) => ws.read(cx).focus_target(cx).focus(window, cx),
+            None => self.focus.focus(window, cx),
+        }
+        cx.notify();
+    }
+
+    fn load(&mut self, slug: &str, cx: &mut Context<Self>) -> Option<Project> {
+        match dialogs::load(slug) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                self.toast(format!("{e:#}"), cx);
+                None
+            }
+        }
+    }
+
+    fn freeze(&mut self, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.load(slug, cx) else {
+            return;
+        };
+        self.sync(cx);
+        let (config, bridge) = (self.config.clone(), self.bridge.clone());
+        let dialog = cx.new(|cx| FreezeDialog::new(project, config, bridge, window, cx));
+        self.show_dialog(dialog, window, cx);
+    }
+
+    fn wait(&mut self, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.load(slug, cx) else {
+            return;
+        };
+        let bridge = self.bridge.clone();
+        let dialog = cx.new(|cx| WaitDialog::new(project, bridge, window, cx));
+        self.show_dialog(dialog, window, cx);
+    }
+
+    fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let dialog = cx.new(|cx| NewProjectDialog::new(dir, window, cx));
+        self.show_dialog(dialog, window, cx);
+    }
+
+    /// Makes a frozen project live and shows its workspace.
+    fn thaw(&mut self, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let s = slug.to_string();
+        self.run_op("thaw the project", cx, move |_| ops::thaw(&s));
+        self.select(Some(slug.to_string()), window, cx);
+    }
+
+    /// Marks the project done, closes its workspace and goes home.
+    fn done(&mut self, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let s = slug.to_string();
+        self.run_op("mark the project done", cx, move |bridge| {
+            ops::done(&s)?;
+            if let Ok(project) = ctx_core::store::load(&s) {
+                ctx_core::terminals::Terminals::close(bridge, &project)?;
+            }
+            Ok(())
+        });
+        if self.selected.as_deref() == Some(slug) {
+            self.select(None, window, cx);
+        }
     }
 
     /// The selected project's workspace, if it is open.
@@ -160,12 +391,24 @@ impl Root {
 
     /// Opens the selected project's workspace unless it is open.
     fn open_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.selected_project().cloned() else {
-            return;
-        };
-        if self.workspaces.contains_key(&project.slug) {
+        if let Some(slug) = self.selected.clone() {
+            self.open_workspace_of(&slug, window, cx);
+        }
+    }
+
+    /// Opens the project's workspace unless it is open. A project the snapshot does not have
+    /// yet, such as one just made, is read from the store.
+    fn open_workspace_of(&mut self, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspaces.contains_key(slug) {
             return;
         }
+        let project = match self.snapshot.project(slug) {
+            Some(p) => p.clone(),
+            None => match ctx_core::store::load(slug) {
+                Ok(p) => p,
+                Err(_) => return,
+            },
+        };
         let claude = self.claude.clone();
         let panel_open = self.panel_open;
         let ws = cx.new(|cx| Workspace::new(&project, claude, panel_open, window, cx));
@@ -173,7 +416,9 @@ impl Root {
             WorkspaceEvent::TogglePanel => root.toggle_panel(cx),
         });
         self._workspace_events.push(events);
-        ws.read(cx).focus_target(cx).focus(window, cx);
+        if self.selected.as_deref() == Some(slug) {
+            ws.read(cx).focus_target(cx).focus(window, cx);
+        }
         self.workspaces.insert(project.slug, ws);
     }
 
@@ -187,6 +432,57 @@ impl Root {
         self.selected
             .as_deref()
             .and_then(|s| self.snapshot.project(s))
+    }
+
+    /// The panel's buttons for the project's state.
+    fn actions(&self, p: &Project, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let frozen = p.state == State::Frozen;
+        let (a, b, c) = (p.slug.clone(), p.slug.clone(), p.slug.clone());
+        div()
+            .flex()
+            .gap(px(6.0))
+            .px(px(18.0))
+            .py(px(10.0))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .text_size(px(12.0))
+            .child(if frozen {
+                dialogs::primary("act-thaw", "Thaw")
+                    .on_click(cx.listener(move |root, _, window, cx| root.thaw(&a, window, cx)))
+            } else {
+                dialogs::primary("act-freeze", "Freeze…")
+                    .on_click(cx.listener(move |root, _, window, cx| root.freeze(&a, window, cx)))
+            })
+            .child(
+                button("act-wait", "Wait…")
+                    .on_click(cx.listener(move |root, _, window, cx| root.wait(&b, window, cx))),
+            )
+            .child(
+                button("act-done", "Done")
+                    .on_click(cx.listener(move |root, _, window, cx| root.done(&c, window, cx))),
+            )
+    }
+
+    fn toasts(&self) -> impl IntoElement + use<> {
+        div()
+            .absolute()
+            .right(px(16.0))
+            .bottom(px(16.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .children(self.toasts.iter().map(|(_, text)| {
+                div()
+                    .max_w(px(420.0))
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .rounded(px(8.0))
+                    .bg(rgb(RAISED))
+                    .border_1()
+                    .border_color(rgb(CONTROL_BORDER))
+                    .shadow_lg()
+                    .child(text.clone())
+            }))
     }
 
     fn drop_project(&mut self, dragged: &Dragged, cx: &mut Context<Self>) {
@@ -253,6 +549,18 @@ impl Root {
                     .when(!home, |d| d.hover(|s| s.bg(rgb(RAISED))))
                     .on_click(cx.listener(|root, _, window, cx| root.select(None, window, cx)))
                     .child("Home"),
+            )
+            .child(
+                div()
+                    .id("new-project")
+                    .px(px(8.0))
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .text_color(rgb(SECONDARY))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(RAISED)).text_color(rgb(TEXT)))
+                    .on_click(cx.listener(|root, _, window, cx| root.new_project(window, cx)))
+                    .child("+ New project  ⌘N"),
             );
         for (group, projects) in self.snapshot.groups() {
             let mut section = div()
@@ -630,6 +938,7 @@ impl Root {
             since.push(format!("frozen {}", text::ago(h.time, now)));
         }
         let slug = p.slug.clone();
+        let thaw = p.slug.clone();
         div()
             .flex_1()
             .min_w(px(0.0))
@@ -680,13 +989,23 @@ impl Root {
                         .child(since.join(" · ")),
                 )
             })
-            .child(div().flex().child(
-                button(SharedString::from(format!("look-{}", p.slug)), "Look first").on_click(
-                    cx.listener(move |root, _, window, cx| {
-                        root.select(Some(slug.clone()), window, cx)
-                    }),
-                ),
-            ))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(
+                        dialogs::primary(SharedString::from(format!("thaw-{}", p.slug)), "Thaw")
+                            .on_click(cx.listener(move |root, _, window, cx| {
+                                root.thaw(&thaw, window, cx)
+                            })),
+                    )
+                    .child(
+                        button(SharedString::from(format!("look-{}", p.slug)), "Look first")
+                            .on_click(cx.listener(move |root, _, window, cx| {
+                                root.select(Some(slug.clone()), window, cx)
+                            })),
+                    ),
+            )
     }
 
     fn toggle_panel(&mut self, cx: &mut Context<Self>) {
@@ -741,6 +1060,7 @@ impl Root {
             .border_l_1()
             .border_color(rgb(BORDER))
             .child(header)
+            .child(self.actions(p, cx))
             .child(body)
     }
 
@@ -1123,7 +1443,9 @@ impl Render for Root {
             .text_color(rgb(TEXT))
             .bg(rgb(BACKGROUND))
             .track_focus(&self.focus)
+            .relative()
             .on_action(cx.listener(|root, _: &TogglePanel, _, cx| root.toggle_panel(cx)))
+            .on_action(cx.listener(|root, _: &NewProject, window, cx| root.new_project(window, cx)))
             .on_drop(cx.listener(|root, _: &Dragged, _, cx| {
                 // A drop outside the project rows leaves the order as it was.
                 root.drop_at = None;
@@ -1139,6 +1461,24 @@ impl Render for Root {
                     .child(main)
                     .children(panel),
             )
+            .child(self.toasts())
+            .children(self.dialog.as_ref().map(|(view, _)| {
+                div()
+                    .id("dialog-layer")
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(hsla(0.0, 0.0, 0.0, 0.5))
+                    .occlude()
+                    .on_key_down(cx.listener(|root, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "escape" {
+                            root.close_dialog(window, cx);
+                        }
+                    }))
+                    .child(view.clone())
+            }))
     }
 }
 
@@ -1225,5 +1565,12 @@ fn entry_text(entry: &JournalEntry) -> (String, String) {
             None => entry.heading.clone(),
         };
         (meta, body)
+    }
+}
+
+impl Drop for Root {
+    fn drop(&mut self) {
+        // The watcher stops when the window does.
+        self.bridge.stop();
     }
 }

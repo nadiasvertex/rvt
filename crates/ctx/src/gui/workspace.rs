@@ -9,6 +9,9 @@ use ctx_core::store::{Project, Window as SavedWindow};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use alacritty_terminal::event_loop::EventLoopSender;
+
+use super::bridge::OpenWorkspace;
 use super::note::{NoteEvent, NoteView};
 use super::pty::{GridSize, Launch, Pty};
 use super::tabs::{self, Restored, Saved};
@@ -76,6 +79,8 @@ pub struct Workspace {
     focus: FocusHandle,
     pub panel_open: bool,
     error: Option<String>,
+    /// Whether the user opened, closed or renamed a tab since the workspace was restored.
+    changed: bool,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -101,11 +106,13 @@ impl Workspace {
             focus: cx.focus_handle(),
             panel_open,
             error: None,
+            changed: false,
         };
         for Restored { dir, name } in tabs::restore(&project.layout, &dir) {
             workspace.open_terminal(Kind::Shell, Launch::default(), dir, name, window, cx);
         }
         workspace.active = 0;
+        workspace.changed = false;
         workspace
     }
 
@@ -166,6 +173,7 @@ impl Workspace {
             TerminalEvent::Exited => ws.close(&tab_id, window, cx),
             TerminalEvent::Foreground => cx.notify(),
         });
+        self.changed = true;
         self.tabs.push(Tab {
             id,
             content: Content::Terminal(kind, view),
@@ -264,6 +272,7 @@ impl Workspace {
             return;
         };
         self.tabs.remove(index);
+        self.changed = true;
         if index < self.active || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
@@ -328,8 +337,33 @@ impl Workspace {
         tab.name.clone().unwrap_or_else(|| self.auto_name(tab, cx))
     }
 
+    /// The workspace as ctx's operations see it, and each terminal's input.
+    pub fn describe(&self, name: &str, cx: &App) -> (OpenWorkspace, Vec<(String, EventLoopSender)>) {
+        let writers: Vec<(String, EventLoopSender)> = self
+            .tabs
+            .iter()
+            .filter_map(|t| match &t.content {
+                Content::Terminal(_, view) => Some((t.id.clone(), view.read(cx).writer())),
+                Content::Note(_) => None,
+            })
+            .collect();
+        let open = OpenWorkspace {
+            name: name.to_string(),
+            layout: self.changed.then(|| self.layout(cx)),
+            terminals: writers.iter().map(|(id, _)| id.clone()).collect(),
+        };
+        (open, writers)
+    }
+
+    /// The ID of the active tab's terminal, if the active tab is a terminal.
+    pub fn active_terminal(&self) -> Option<String> {
+        self.tabs
+            .get(self.active)
+            .filter(|t| matches!(t.content, Content::Terminal(..)))
+            .map(|t| t.id.clone())
+    }
+
     /// The layout to save for the workspace: its shell tabs, with the names the user set.
-    #[allow(dead_code)] // Saved by the freeze, which comes with the actions.
     pub fn layout(&self, cx: &App) -> Vec<SavedWindow> {
         let saved: Vec<Saved> = self
             .tabs
@@ -376,6 +410,7 @@ impl Workspace {
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
                     tab.name = name;
                 }
+                self.changed = true;
                 self.renaming = None;
                 self.focus(window, cx);
             }

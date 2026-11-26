@@ -106,6 +106,11 @@ impl ClaudeSession {
     /// Whether Claude kept a transcript of the session. `claude --resume` needs one, and Claude
     /// writes none for a session that ends before the first message, or after it is deleted.
     pub fn resumable(&self) -> bool {
+        self.transcript().is_some()
+    }
+
+    /// The file Claude keeps the session's transcript in, if it exists.
+    pub fn transcript(&self) -> Option<PathBuf> {
         let config = self
             .config_dir
             .clone()
@@ -114,19 +119,17 @@ impl ClaudeSession {
         let projects = config.join("projects");
         let file = format!("{}.jsonl", self.id);
         if let Some(cwd) = &self.cwd {
-            if projects
-                .join(claude_project_name(cwd))
-                .join(&file)
-                .is_file()
-            {
-                return true;
+            let path = projects.join(claude_project_name(cwd)).join(&file);
+            if path.is_file() {
+                return Some(path);
             }
         }
         fs::read_dir(&projects)
             .into_iter()
             .flatten()
             .flatten()
-            .any(|e| e.path().join(&file).is_file())
+            .map(|e| e.path().join(&file))
+            .find(|p| p.is_file())
     }
 }
 
