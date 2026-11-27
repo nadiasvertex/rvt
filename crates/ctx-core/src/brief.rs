@@ -359,7 +359,10 @@ pub fn draft_handoff(cfg: &Config, slug: &str, stage: &dyn Fn(Stage)) -> Result<
         let text = transcript_text(&read_tail(&path, TRANSCRIPT_TAIL), TRANSCRIPT_LIMIT);
         if !text.is_empty() {
             let name = live.name.unwrap_or_else(|| session.label());
-            let _ = writeln!(sessions, "\nClaude session {name}, latest messages:\n{text}");
+            let _ = writeln!(
+                sessions,
+                "\nClaude session {name}, latest messages:\n{text}"
+            );
         }
     }
     stage(Stage::ReadingProject);

@@ -9,8 +9,8 @@ use chrono::{DateTime, Local, Utc};
 use ctx_core::config::Config;
 use ctx_core::item::{ItemRef, Tone};
 use ctx_core::live::Status;
-use ctx_core::order::{self, Group};
 use ctx_core::ops;
+use ctx_core::order::{self, Group};
 use ctx_core::store::{Project, State};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -134,8 +134,7 @@ impl Root {
                         if root.workspace_entity().is_none() {
                             root.open_workspace(window, cx);
                             // Debug builds can also open the project's newest note.
-                            if cfg!(debug_assertions)
-                                && std::env::var_os("CTX_GUI_NOTE").is_some()
+                            if cfg!(debug_assertions) && std::env::var_os("CTX_GUI_NOTE").is_some()
                             {
                                 let note = root
                                     .selected
@@ -340,7 +339,11 @@ impl Root {
                 projects.push(Listed {
                     slug: p.slug.clone(),
                     name: p.name.clone(),
-                    detail: format!("{} · {}", group.label(), text::status(&self.snapshot, p, now)),
+                    detail: format!(
+                        "{} · {}",
+                        group.label(),
+                        text::status(&self.snapshot, p, now)
+                    ),
                 });
             }
         }
@@ -419,7 +422,12 @@ impl Root {
     }
 
     /// Shows the item's review replies in a tab of the selected project.
-    fn open_review(&mut self, item: ctx_core::item::ItemRef, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_review(
+        &mut self,
+        item: ctx_core::item::ItemRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let url = self
             .snapshot
             .state(&item)
@@ -1136,9 +1144,11 @@ impl Root {
                     .gap(px(8.0))
                     .child(
                         dialogs::primary(SharedString::from(format!("thaw-{}", p.slug)), "Thaw")
-                            .on_click(cx.listener(move |root, _, window, cx| {
-                                root.thaw(&thaw, window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(move |root, _, window, cx| {
+                                    root.thaw(&thaw, window, cx)
+                                }),
+                            ),
                     )
                     .child(
                         button(SharedString::from(format!("look-{}", p.slug)), "Look first")
@@ -1412,16 +1422,9 @@ impl Root {
                                 .truncate()
                                 .child(note.title.clone()),
                         )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(SECONDARY))
-                                .child(format!(
-                                    "{} · {}",
-                                    note.source,
-                                    text::ago(note.captured, now)
-                                )),
-                        ),
+                        .child(div().text_size(px(12.0)).text_color(rgb(SECONDARY)).child(
+                            format!("{} · {}", note.source, text::ago(note.captured, now)),
+                        )),
                 );
             }
             body = body.child(list);
@@ -1596,17 +1599,21 @@ impl Render for Root {
             .relative()
             .on_action(cx.listener(|root, _: &TogglePanel, _, cx| root.toggle_panel(cx)))
             .on_action(cx.listener(|root, _: &NewProject, window, cx| root.new_project(window, cx)))
-            .on_modifiers_changed(cx.listener(|root, event: &ModifiersChangedEvent, window, cx| {
-                let m = event.modifiers;
-                let others = m.control || m.alt || m.platform || m.function;
-                let shift_alone = m.shift && !others;
-                let nothing = !m.shift && !others;
-                if root.double_shift.modifiers(shift_alone, nothing, Instant::now())
-                    && root.dialog.is_none()
-                {
-                    root.open_palette(window, cx);
-                }
-            }))
+            .on_modifiers_changed(
+                cx.listener(|root, event: &ModifiersChangedEvent, window, cx| {
+                    let m = event.modifiers;
+                    let others = m.control || m.alt || m.platform || m.function;
+                    let shift_alone = m.shift && !others;
+                    let nothing = !m.shift && !others;
+                    if root
+                        .double_shift
+                        .modifiers(shift_alone, nothing, Instant::now())
+                        && root.dialog.is_none()
+                    {
+                        root.open_palette(window, cx);
+                    }
+                }),
+            )
             .capture_key_down(cx.listener(|root, _: &KeyDownEvent, _, _| root.double_shift.key()))
             .on_drop(cx.listener(|root, _: &Dragged, _, cx| {
                 // A drop outside the project rows leaves the order as it was.

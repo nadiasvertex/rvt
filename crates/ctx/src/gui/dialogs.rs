@@ -114,7 +114,12 @@ pub struct WaitDialog {
 impl EventEmitter<DialogEvent> for WaitDialog {}
 
 impl WaitDialog {
-    pub fn new(project: Project, bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        project: Project,
+        bridge: Bridge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("review PR 4711, closed #123, ci !78, until 2h, claude, or any text")
@@ -199,9 +204,10 @@ impl Render for WaitDialog {
             .flex()
             .gap(px(8.0))
             .when(waiting, |d| {
-                d.child(button("wait-remove", "Remove wait").on_click(
-                    cx.listener(|d, _, _, cx| d.set(None, cx)),
-                ))
+                d.child(
+                    button("wait-remove", "Remove wait")
+                        .on_click(cx.listener(|d, _, _, cx| d.set(None, cx))),
+                )
             })
             .child(
                 button("wait-cancel", "Cancel")
@@ -485,7 +491,8 @@ impl FreezeDialog {
                 self.filling = false;
             }
             DraftMessage::Done(Err(e)) => {
-                self.draft = DraftState::Failed(format!("Claude could not draft the handoff: {e:#}"));
+                self.draft =
+                    DraftState::Failed(format!("Claude could not draft the handoff: {e:#}"));
             }
         }
         cx.notify();
@@ -499,7 +506,10 @@ impl FreezeDialog {
 
     fn freeze(&mut self, cx: &mut Context<Self>) {
         let Some(config) = self.config.as_ref().clone() else {
-            self.error = Some("ctx has no config, so it cannot freeze. Run ctx once in a terminal to write one.".into());
+            self.error = Some(
+                "ctx has no config, so it cannot freeze. Run ctx once in a terminal to write one."
+                    .into(),
+            );
             cx.notify();
             return;
         };
@@ -568,7 +578,9 @@ impl FreezeDialog {
                                 .text_size(px(12.0))
                                 .text_color(rgb(ACCENT))
                                 .cursor_pointer()
-                                .on_click(cx.listener(|d, _, window, cx| d.write_myself(window, cx)))
+                                .on_click(
+                                    cx.listener(|d, _, window, cx| d.write_myself(window, cx)),
+                                )
                                 .child("Write it myself"),
                         ),
                 )
@@ -615,7 +627,11 @@ impl Render for FreezeDialog {
                     "Last handoff, {}",
                     text::ago(h.time, Utc::now())
                 )))
-                .children(lines.into_iter().map(|l| div().text_color(rgb(SECONDARY)).child(l)))
+                .children(
+                    lines
+                        .into_iter()
+                        .map(|l| div().text_color(rgb(SECONDARY)).child(l)),
+                )
         });
         let close_tabs = self.close_tabs;
         let body = div()

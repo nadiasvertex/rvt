@@ -99,11 +99,11 @@ impl Render for NoteView {
                     .text_color(rgb(SECONDARY))
                     .child(self.path.to_string_lossy().into_owned()),
             )
-            .child(
-                button("note-edit", "Open in editor").on_click(cx.listener(move |_, _, _, cx| {
+            .child(button("note-edit", "Open in editor").on_click(cx.listener(
+                move |_, _, _, cx| {
                     cx.emit(NoteEvent::Edit(path.clone()));
-                })),
-            );
+                },
+            )));
         let body = match &self.note {
             None => div()
                 .p(px(24.0))

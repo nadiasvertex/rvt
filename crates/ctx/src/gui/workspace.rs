@@ -13,8 +13,8 @@ use alacritty_terminal::event_loop::EventLoopSender;
 
 use super::bridge::OpenWorkspace;
 use super::note::{NoteEvent, NoteView};
-use super::review::{ReviewEvent, ReviewView};
 use super::pty::{GridSize, Launch, Pty};
+use super::review::{ReviewEvent, ReviewView};
 use super::tabs::{self, Restored, Saved};
 use super::theme::*;
 use super::view::{TerminalEvent, TerminalView};
@@ -392,7 +392,11 @@ impl Workspace {
     }
 
     /// The workspace as ctx's operations see it, and each terminal's input.
-    pub fn describe(&self, name: &str, cx: &App) -> (OpenWorkspace, Vec<(String, EventLoopSender)>) {
+    pub fn describe(
+        &self,
+        name: &str,
+        cx: &App,
+    ) -> (OpenWorkspace, Vec<(String, EventLoopSender)>) {
         let writers: Vec<(String, EventLoopSender)> = self
             .tabs
             .iter()
@@ -541,7 +545,10 @@ impl Workspace {
                 cx.listener(move |ws, event: &MouseDownEvent, window, cx| {
                     if event.click_count == 2 {
                         ws.start_rename(index, window, cx);
-                    } else if ws.renaming.as_ref().is_none_or(|(r, _)| *r != ws.tabs[index].id)
+                    } else if ws
+                        .renaming
+                        .as_ref()
+                        .is_none_or(|(r, _)| *r != ws.tabs[index].id)
                     {
                         ws.activate(index, window, cx);
                     }
@@ -558,7 +565,9 @@ impl Workspace {
                     .justify_center()
                     .rounded(px(4.0))
                     .text_color(rgb(MUTED))
-                    .when(!active, |d| d.invisible().group_hover("tab", |s| s.visible()))
+                    .when(!active, |d| {
+                        d.invisible().group_hover("tab", |s| s.visible())
+                    })
                     .hover(|s| s.bg(rgb(SELECTED)).text_color(rgb(TEXT)))
                     .on_mouse_down(
                         MouseButton::Left,

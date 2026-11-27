@@ -77,7 +77,11 @@ impl ReviewView {
         let Some(evaluation) = &self.evaluation else {
             return;
         };
-        let texts: Vec<String> = evaluation.responses.iter().map(|r| r.reply.clone()).collect();
+        let texts: Vec<String> = evaluation
+            .responses
+            .iter()
+            .map(|r| r.reply.clone())
+            .collect();
         self.filling = true;
         for (i, reply) in texts.into_iter().enumerate() {
             let state = cx.new(|cx| {
@@ -85,12 +89,13 @@ impl ReviewView {
                     .auto_grow(2, 10)
                     .default_value(reply)
             });
-            self._events.push(cx.subscribe_in(&state, window, move |v, s, e, _, cx| {
-                if matches!(e, InputEvent::Change) && !v.filling {
-                    let text = s.read(cx).value().to_string();
-                    v.edit(i, |r| r.reply = text, cx);
-                }
-            }));
+            self._events
+                .push(cx.subscribe_in(&state, window, move |v, s, e, _, cx| {
+                    if matches!(e, InputEvent::Change) && !v.filling {
+                        let text = s.read(cx).value().to_string();
+                        v.edit(i, |r| r.reply = text, cx);
+                    }
+                }));
             self.replies.push(state);
         }
         self.filling = false;
@@ -214,9 +219,17 @@ impl ReviewView {
                 let mut text = format!(
                     "Posted {} {} and resolved {} {}.",
                     summary.replied,
-                    if summary.replied == 1 { "reply" } else { "replies" },
+                    if summary.replied == 1 {
+                        "reply"
+                    } else {
+                        "replies"
+                    },
                     summary.resolved,
-                    if summary.resolved == 1 { "thread" } else { "threads" },
+                    if summary.resolved == 1 {
+                        "thread"
+                    } else {
+                        "threads"
+                    },
                 );
                 if let Some(e) = &summary.error {
                     text.push_str(&format!(" {e}"));
@@ -289,7 +302,11 @@ impl ReviewView {
                     div()
                         .text_size(px(12.0))
                         .text_color(rgb(SECONDARY))
-                        .child(format!("{} · {}", c.author, text::ago(c.date, chrono::Utc::now()))),
+                        .child(format!(
+                            "{} · {}",
+                            c.author,
+                            text::ago(c.date, chrono::Utc::now())
+                        )),
                 )
                 .child(div().child(text::plain(&c.body)))
         });
@@ -308,11 +325,9 @@ impl ReviewView {
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .child(
-                        check(("pick", i), selected).on_click(cx.listener(move |v, _, _, cx| {
-                            v.edit(i, |r| r.selected = !r.selected, cx)
-                        })),
-                    )
+                    .child(check(("pick", i), selected).on_click(
+                        cx.listener(move |v, _, _, cx| v.edit(i, |r| r.selected = !r.selected, cx)),
+                    ))
                     .child(pill(r.assessment.label(), chip(tone)))
                     .child(
                         div()
@@ -414,7 +429,11 @@ impl Render for ReviewView {
                         (None, Some(e)) => format!(
                             "Claude read {} {} {} at {}",
                             e.responses.len(),
-                            if e.responses.len() == 1 { "thread" } else { "threads" },
+                            if e.responses.len() == 1 {
+                                "thread"
+                            } else {
+                                "threads"
+                            },
                             text::ago(e.created, chrono::Utc::now()),
                             e.local_head.get(..10).unwrap_or(&e.local_head),
                         ),

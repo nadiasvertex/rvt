@@ -314,9 +314,9 @@ impl Render for Palette {
                     .cursor_pointer()
                     .when(i == self.selected, |d| d.bg(rgb(SELECTED)))
                     .hover(|s| s.bg(rgb(RAISED)))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(PaletteEvent::Run(choice.clone()))
-                    }))
+                    .on_click(
+                        cx.listener(move |_, _, _, cx| cx.emit(PaletteEvent::Run(choice.clone()))),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -419,6 +419,19 @@ mod tests {
         let at = start + Duration::from_millis(200);
         assert!(!d.modifiers(true, false, at));
         assert!(!d.modifiers(false, false, at + Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn typing_capitals_does_not_open_the_palette() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut d = DoubleShift::default();
+        // "AB" typed quickly: Shift goes down and up around each letter.
+        for (down, up) in [(0, 60), (120, 180)] {
+            assert!(!d.modifiers(true, false, at(down)));
+            d.key();
+            assert!(!d.modifiers(false, true, at(up)));
+        }
     }
 
     #[test]

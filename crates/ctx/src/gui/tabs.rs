@@ -102,7 +102,9 @@ pub fn save(tabs: &[Saved]) -> Vec<Window> {
             name: t.set.clone().unwrap_or_else(|| t.shown.clone()),
             auto_name: t.set.is_none(),
             layout: GUI_LAYOUT.into(),
-            terminals: vec![Terminal { path: t.dir.clone() }],
+            terminals: vec![Terminal {
+                path: t.dir.clone(),
+            }],
         })
         .collect()
 }
@@ -151,7 +153,10 @@ mod tests {
         );
         assert_eq!(auto_name("vim", Some(home), Some(home)), "vim · ~");
         assert_eq!(auto_name("htop", None, Some(home)), "htop");
-        assert_eq!(auto_name("zsh", Some(Path::new("/")), Some(home)), "zsh · /");
+        assert_eq!(
+            auto_name("zsh", Some(Path::new("/")), Some(home)),
+            "zsh · /"
+        );
     }
 
     #[test]

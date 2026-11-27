@@ -336,6 +336,100 @@ mod tests {
         }
     }
 
+    /// Sends a key as the window does, through the key encoder.
+    fn press(pty: &Pty, key: &str, typed: Option<&str>) {
+        use super::super::keys::{Mods, encode};
+        use alacritty_terminal::term::TermMode;
+        let app_cursor = pty.term.lock().mode().contains(TermMode::APP_CURSOR);
+        if let Some(bytes) = encode(key, typed, Mods::default(), app_cursor) {
+            pty.write(bytes);
+        }
+    }
+
+    fn type_text(pty: &Pty, text: &str) {
+        for c in text.chars() {
+            let key = match c {
+                '\r' => "enter".to_string(),
+                ' ' => "space".to_string(),
+                c => c.to_lowercase().to_string(),
+            };
+            press(pty, &key, Some(&c.to_string()));
+        }
+    }
+
+    fn alt_screen(pty: &Pty) -> bool {
+        use alacritty_terminal::term::TermMode;
+        pty.term.lock().mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ctx-pty-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn vim_edits_and_saves_a_file() {
+        let dir = scratch("vim");
+        let file = dir.join("note.txt");
+        let script = format!(
+            "vim -u NONE -N -n {}; echo vim-done; sleep 5",
+            file.display()
+        );
+        let (pty, rx) = Pty::spawn(&sh(&script), SIZE, (8, 16)).unwrap();
+        // vim -u NONE draws `~` on the empty lines.
+        wait_for(&rx, &pty, |s| s[1] == "~");
+        assert!(alt_screen(&pty));
+        type_text(&pty, "ihello from ctx");
+        wait_for(&rx, &pty, |s| s[0] == "hello from ctx");
+        press(&pty, "escape", None);
+        type_text(&pty, ":wq\r");
+        wait_for(&rx, &pty, |s| s.iter().any(|l| l == "vim-done"));
+        assert!(!alt_screen(&pty));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello from ctx\n");
+    }
+
+    #[test]
+    fn vim_redraws_after_a_resize() {
+        let (mut pty, rx) = Pty::spawn(&sh("vim -u NONE -N -n; sleep 5"), SIZE, (8, 16)).unwrap();
+        wait_for(&rx, &pty, |s| s[1] == "~");
+        pty.resize(
+            GridSize {
+                columns: 50,
+                lines: 14,
+            },
+            (8, 16),
+        );
+        // The empty-line markers reach the new bottom line, above the command line.
+        wait_for(&rx, &pty, |s| s.len() == 14 && s[12] == "~");
+        type_text(&pty, ":q\r");
+    }
+
+    #[test]
+    fn less_scrolls_and_gives_the_screen_back() {
+        let dir = scratch("less");
+        let file = dir.join("lines.txt");
+        let text: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&file, text).unwrap();
+        let script = format!(
+            "echo before; less {}; echo less-done; sleep 5",
+            file.display()
+        );
+        let (pty, rx) = Pty::spawn(&sh(&script), SIZE, (8, 16)).unwrap();
+        wait_for(&rx, &pty, |s| s[0] == "line 1");
+        assert!(alt_screen(&pty));
+        press(&pty, "down", None);
+        press(&pty, "down", None);
+        wait_for(&rx, &pty, |s| s[0] == "line 3");
+        press(&pty, "space", Some(" "));
+        wait_for(&rx, &pty, |s| s[0] != "line 3" && s[0].starts_with("line "));
+        type_text(&pty, "q");
+        wait_for(&rx, &pty, |s| s.iter().any(|l| l == "less-done"));
+        assert!(!alt_screen(&pty));
+        assert_eq!(screen_text(&pty.term.lock())[0], "before");
+    }
+
     #[test]
     fn a_resize_reaches_the_program() {
         let (mut pty, rx) = Pty::spawn(
