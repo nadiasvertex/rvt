@@ -2,6 +2,7 @@
 //! model, so every glyph sits on the cell grid whatever the font does.
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 
 use alacritty_terminal::event::Event;
@@ -49,6 +50,8 @@ struct Metrics {
     origin: Point<Pixels>,
     cell_width: Pixels,
     line_height: Pixels,
+    /// The top left of the cursor's cell, where text being composed and the IME's window go.
+    cursor: Point<Pixels>,
 }
 
 pub struct TerminalView {
@@ -60,6 +63,11 @@ pub struct TerminalView {
     /// Scrolled distance not yet turned into whole lines.
     scroll_lines: f32,
     selecting: bool,
+    /// Whether the program was last told the terminal has focus, for programs that ask.
+    reported_focus: bool,
+    /// Text an input method or a dead key is composing, shown at the cursor until it is done.
+    marked: Rc<RefCell<Option<String>>>,
+    _focus: [Subscription; 3],
     _events: Task<()>,
     _foreground: Task<()>,
 }
@@ -104,6 +112,13 @@ impl TerminalView {
             }
         });
         let first = pty.foreground();
+        let report =
+            |view: &mut Self, window: &mut Window, _: &mut Context<Self>| view.report_focus(window);
+        let focus_subscriptions = [
+            cx.on_focus(&focus, window, report),
+            cx.on_blur(&focus, window, report),
+            cx.observe_window_activation(window, report),
+        ];
         TerminalView {
             pty: Rc::new(RefCell::new(pty)),
             focus,
@@ -111,11 +126,15 @@ impl TerminalView {
                 origin: Point::default(),
                 cell_width,
                 line_height,
+                cursor: Point::default(),
             })),
             foreground: first,
             exited: false,
             scroll_lines: 0.0,
             selecting: false,
+            reported_focus: false,
+            marked: Rc::new(RefCell::new(None)),
+            _focus: focus_subscriptions,
             _events: task,
             _foreground: foreground,
         }
@@ -186,6 +205,19 @@ impl TerminalView {
         }
     }
 
+    /// Tells the program when the terminal gains or loses focus, if it asked to know. The
+    /// terminal has focus when its view does and the window is the active one.
+    fn report_focus(&mut self, window: &Window) {
+        let focused = self.focus.is_focused(window) && window.is_window_active();
+        if focused == self.reported_focus {
+            return;
+        }
+        self.reported_focus = focused;
+        if self.mode().contains(TermMode::FOCUS_IN_OUT) {
+            self.pty.borrow().write(keys::focus(focused));
+        }
+    }
+
     fn mode(&self) -> TermMode {
         *self.pty.borrow().term.lock().mode()
     }
@@ -243,16 +275,27 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        // While text is being composed, every key belongs to the input method.
+        if self.marked.borrow().is_some() {
+            return;
+        }
+        let typed = keystroke.key_char.as_deref();
+        let mods = mods(keystroke.modifiers);
+        // Text keys go on to macOS, which sends their text back through the input handler, so
+        // dead keys and input methods can compose characters first.
+        if keys::to_input(&keystroke.key, typed, mods) {
+            return;
+        }
         let app_cursor = self.mode().contains(TermMode::APP_CURSOR);
-        let Some(bytes) = keys::encode(
-            &keystroke.key,
-            keystroke.key_char.as_deref(),
-            mods(keystroke.modifiers),
-            app_cursor,
-        ) else {
+        let Some(bytes) = keys::encode(&keystroke.key, typed, mods, app_cursor) else {
             return;
         };
         cx.stop_propagation();
+        self.send(bytes, cx);
+    }
+
+    /// Writes typed bytes to the program, clearing the selection and scrolling to the bottom.
+    fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let pty = self.pty.borrow();
         {
             let mut term = pty.term.lock();
@@ -261,6 +304,18 @@ impl TerminalView {
         }
         pty.write(bytes);
         cx.notify();
+    }
+
+    fn set_marked(&mut self, text: Option<String>, cx: &mut Context<Self>) {
+        *self.marked.borrow_mut() = text.filter(|t| !t.is_empty());
+        cx.notify();
+    }
+
+    fn marked_len(&self) -> usize {
+        self.marked
+            .borrow()
+            .as_ref()
+            .map_or(0, |t| t.encode_utf16().count())
     }
 
     fn copy(&mut self, cx: &mut Context<Self>) {
@@ -397,6 +452,9 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window);
         let pty = self.pty.clone();
         let metrics = self.metrics.clone();
+        let marked = self.marked.borrow().clone();
+        let input = TerminalInput(cx.entity().downgrade());
+        let focus = self.focus.clone();
         div()
             .size_full()
             .p(px(PADDING))
@@ -409,8 +467,13 @@ impl Render for TerminalView {
             .on_scroll(cx.listener(Self::scroll))
             .child(
                 canvas(
-                    move |bounds, window, _| layout(&pty, &metrics, bounds, focused, window),
-                    move |_, frame, window, cx| frame.paint(window, cx),
+                    move |bounds, window, _| {
+                        layout(&pty, &metrics, bounds, focused, marked.as_deref(), window)
+                    },
+                    move |_, frame, window, cx| {
+                        frame.paint(window, cx);
+                        window.handle_input(&focus, input, cx);
+                    },
                 )
                 .size_full(),
             )
@@ -442,6 +505,8 @@ struct Frame {
     backgrounds: Vec<(usize, usize, usize, Rgb)>,
     lines: Vec<(usize, usize, ShapedLine)>,
     cursor: Option<PaintQuad>,
+    /// Text being composed, drawn over the cells from the cursor.
+    marked: Option<(Point<Pixels>, ShapedLine)>,
 }
 
 impl Frame {
@@ -473,6 +538,14 @@ impl Frame {
                 cx,
             );
         }
+        if let Some((origin, shaped)) = &self.marked {
+            let extent = size(shaped.width.max(self.cell_width), self.line_height);
+            window.paint_quad(fill(
+                Bounds::new(*origin, extent),
+                hsla(palette::BACKGROUND),
+            ));
+            let _ = shaped.paint(*origin, self.line_height, TextAlign::Left, None, window, cx);
+        }
     }
 }
 
@@ -482,6 +555,7 @@ fn layout(
     metrics: &Rc<RefCell<Metrics>>,
     bounds: Bounds<Pixels>,
     focused: bool,
+    marked: Option<&str>,
     window: &mut Window,
 ) -> Frame {
     let Metrics {
@@ -635,7 +709,30 @@ fn layout(
         .collect();
 
     let frame_origin = bounds.origin;
+    let cursor_origin = point(
+        frame_origin.x + cell_width * cursor.point.column.0 as f32,
+        frame_origin.y + line_height * cursor_line.max(0) as f32,
+    );
+    metrics.borrow_mut().cursor = cursor_origin;
+    let marked = marked.map(|text| {
+        let color = hsla(palette::named(NamedColor::Foreground, colors));
+        let run = TextRun {
+            len: text.len(),
+            font: font(FONT_FAMILY),
+            color,
+            background_color: None,
+            underline: Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(color),
+                wavy: false,
+            }),
+            strikethrough: None,
+        };
+        let shaped = text_system.shape_line(text.to_string().into(), font_size, &[run], None);
+        (cursor_origin, shaped)
+    });
     let cursor_quad = (cursor.shape != CursorShape::Hidden
+        && marked.is_none()
         && !block_cursor
         && cursor_line >= 0
         && (cursor_line as usize) < term.screen_lines())
@@ -669,5 +766,120 @@ fn layout(
         backgrounds,
         lines,
         cursor: cursor_quad,
+        marked,
+    }
+}
+
+/// Takes text from macOS: typed characters, and the text a dead key or an input method composes.
+/// The terminal has no text of its own to edit, so the only text it reports is what is being
+/// composed, and committed text goes straight to the program.
+struct TerminalInput(WeakEntity<TerminalView>);
+
+impl TerminalInput {
+    fn with<R>(
+        &self,
+        cx: &mut App,
+        f: impl FnOnce(&mut TerminalView, &mut Context<TerminalView>) -> R,
+    ) -> Option<R> {
+        self.0.update(cx, f).ok()
+    }
+}
+
+impl InputHandler for TerminalInput {
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        let end = self.with(cx, |view, _| view.marked_len())?;
+        Some(UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(&mut self, _: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        self.with(cx, |view, _| {
+            view.marked.borrow().is_some().then(|| 0..view.marked_len())
+        })
+        .flatten()
+    }
+
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        adjusted: &mut Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Option<String> {
+        let text = self
+            .with(cx, |view, _| view.marked.borrow().clone())
+            .flatten()?;
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let range = range.start.min(units.len())..range.end.min(units.len());
+        *adjusted = Some(range.clone());
+        String::from_utf16(&units[range]).ok()
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut App,
+    ) {
+        let text = text.to_string();
+        self.with(cx, |view, cx| {
+            view.set_marked(None, cx);
+            view.send(text.into_bytes(), cx);
+        });
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut App,
+    ) {
+        let text = text.to_string();
+        self.with(cx, |view, cx| view.set_marked(Some(text), cx));
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut App) {
+        self.with(cx, |view, cx| view.set_marked(None, cx));
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        self.with(cx, |view, _| {
+            let m = *view.metrics.borrow();
+            Bounds::new(m.cursor, size(m.cell_width, m.line_height))
+        })
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _: Point<Pixels>,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<usize> {
+        None
+    }
+
+    // A held key repeats, as terminal programs expect, rather than offering accented letters.
+    fn apple_press_and_hold_enabled(&mut self) -> bool {
+        false
+    }
+
+    // With an input method such as Japanese on, it sees text keys before the terminal does.
+    fn prefers_ime_for_printable_keys(&mut self, _: &mut Window, _: &mut App) -> bool {
+        true
     }
 }

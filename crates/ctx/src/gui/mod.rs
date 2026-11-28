@@ -38,6 +38,12 @@ pub fn run() -> Result<i32> {
     let mut config = Some(config);
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
+        // Programs in the terminals and the watcher keep running at full speed while the window
+        // is hidden. The Mac may still sleep when idle. The activity lasts until the app quits.
+        std::mem::forget(
+            cx.background_executor()
+                .prevent_app_nap("Terminals and the watcher run in the background"),
+        );
         // Rendered Markdown in note tabs takes its colors from the component theme.
         Theme::change(ThemeMode::Dark, None, cx);
         cx.bind_keys([

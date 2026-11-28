@@ -160,6 +160,25 @@ pub fn mouse(
 }
 
 /// Text to paste, wrapped for bracketed paste when the program asked for it.
+/// Whether a key's text should come from macOS's text input rather than from [`encode`], so that
+/// dead keys and input methods can compose it. That holds for keys that type printable text, apart
+/// from space, Control combinations, and Option on a key it leaves unchanged, which is Meta.
+pub fn to_input(key: &str, typed: Option<&str>, mods: Mods) -> bool {
+    let Some(typed) = typed.filter(|t| !t.is_empty()) else {
+        return false;
+    };
+    let printable = typed
+        .chars()
+        // Control characters, and the private-use characters macOS gives function keys.
+        .all(|c| !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&c));
+    printable && !mods.control && key != "space" && !(mods.alt && typed.eq_ignore_ascii_case(key))
+}
+
+/// What a terminal sends when it gains or loses focus, for programs that ask for focus reports.
+pub fn focus(focused: bool) -> &'static [u8] {
+    if focused { b"\x1b[I" } else { b"\x1b[O" }
+}
+
 pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     if bracketed {
         // A pasted end marker would let the text out of the bracket, so ESC is dropped.
@@ -172,6 +191,31 @@ pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn text_keys_go_to_text_input() {
+        let none = Mods::default();
+        let shift = Mods {
+            shift: true,
+            ..none
+        };
+        let alt = Mods { alt: true, ..none };
+        let control = Mods {
+            control: true,
+            ..none
+        };
+        assert!(to_input("a", Some("a"), none));
+        assert!(to_input("a", Some("A"), shift));
+        assert!(to_input("e", Some("´"), alt), "a dead key");
+        assert!(to_input("s", Some("ß"), alt));
+        assert!(!to_input("a", Some("a"), alt), "Option as Meta");
+        assert!(!to_input("c", Some("c"), control));
+        assert!(!to_input("space", Some(" "), none));
+        assert!(!to_input("enter", Some("\r"), none));
+        assert!(!to_input("tab", Some("\t"), none));
+        assert!(!to_input("up", None, none));
+        assert!(!to_input("f1", Some("\u{f704}"), none));
+    }
+
     use super::*;
 
     const NONE: Mods = Mods {
