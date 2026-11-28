@@ -7,9 +7,9 @@ whose findings you can check off for posting.
 
 The repository is a Cargo workspace. `crates/rvt` is the board, `crates/ctx` is a tool for
 switching between projects (see [its README](crates/ctx/README.md)), and `crates/forge` holds the
-Azure DevOps, GitLab, git and Claude code they share. `crates/view` draws the Markdown and comment
-threads that both show. `crates/ctx-core` holds ctx's projects and logic without its terminal
-interface, so other front ends can use them.
+Azure DevOps, GitLab, git and Claude code they share. `crates/view` draws rvt's Markdown and
+comment threads. `crates/ctx-core` holds ctx's projects and logic without a user interface, so the
+ctx command line and the ctx app share them.
 
 ## Requirements
 
@@ -18,6 +18,9 @@ interface, so other front ends can use them.
 - `git` with SSH access to the configured hosts, and `claude`, for reviews.
 
 ## Build and run
+
+`rust-toolchain.toml` pins the Rust version, and rustup installs it on the first build. The GUI
+crates that the ctx app is being built on need Rust 1.89 or newer.
 
 ```sh
 cargo build --release

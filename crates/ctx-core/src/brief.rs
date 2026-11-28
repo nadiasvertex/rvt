@@ -303,3 +303,232 @@ pub fn import(cfg: &Config, slug: &str, query: &str) -> Result<Imported> {
         path,
     })
 }
+
+/// What `draft_handoff` is doing, for a progress display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    ReadingClaude,
+    ReadingProject,
+    Writing,
+}
+
+impl Stage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Stage::ReadingClaude => "Reading the Claude sessions",
+            Stage::ReadingProject => "Reading the journal and items",
+            Stage::Writing => "Writing the handoff",
+        }
+    }
+
+    /// How far along the draft is, from 0 to 1, when this stage starts.
+    pub fn progress(self) -> f32 {
+        match self {
+            Stage::ReadingClaude => 0.1,
+            Stage::ReadingProject => 0.3,
+            Stage::Writing => 0.5,
+        }
+    }
+}
+
+/// A handoff drafted by Claude for the user to check before freezing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Draft {
+    pub doing: String,
+    pub next: String,
+    /// A wait condition in the form `ctx wait` takes, checked by its parser.
+    pub wait: Option<String>,
+}
+
+/// How much of each Claude transcript goes into the prompt, from its end.
+const TRANSCRIPT_LIMIT: usize = 6000;
+/// How much of a transcript file is read, from its end.
+const TRANSCRIPT_TAIL: u64 = 512 * 1024;
+
+/// Drafts Doing, Next and a wait condition for freezing the project, from the same project text
+/// the brief uses, the recent journal and the project's running Claude sessions. `stage` hears
+/// each stage as it starts.
+pub fn draft_handoff(cfg: &Config, slug: &str, stage: &dyn Fn(Stage)) -> Result<Draft> {
+    let project = store::load(slug)?;
+    stage(Stage::ReadingClaude);
+    let mut sessions = String::new();
+    for (session, live) in ops::live_claudes(cfg, &project) {
+        let Some(path) = session.transcript() else {
+            continue;
+        };
+        let text = transcript_text(&read_tail(&path, TRANSCRIPT_TAIL), TRANSCRIPT_LIMIT);
+        if !text.is_empty() {
+            let name = live.name.unwrap_or_else(|| session.label());
+            let _ = writeln!(
+                sessions,
+                "\nClaude session {name}, latest messages:\n{text}"
+            );
+        }
+    }
+    stage(Stage::ReadingProject);
+    let mut journal: Vec<String> = store::journal_entries(&store::journal(slug))
+        .into_iter()
+        .rev()
+        .take(8)
+        .map(|(heading, body)| format!("## {heading}\n{}", clip(&body, 800)))
+        .collect();
+    journal.reverse();
+    let prompt = format!(
+        "The user is setting this project aside and needs a handoff for when they come back. \
+         Using only the facts below, write what they were doing, in one or two plain sentences, \
+         and the next step, in one sentence. If the project is clearly waiting on something, \
+         suggest a wait condition in one of these forms, using an item label from the list: \
+         `review <item>`, `closed <item>`, `ci <item>`, `state <item> <state>`, `until <30m, 2h, \
+         3d, a weekday or YYYY-MM-DD>`, or a short free-text description. Otherwise leave wait \
+         empty. Do not invent details.\n\n{}\nRecent journal:\n{}\n{}",
+        context(&project, None),
+        journal.join("\n"),
+        sessions
+    );
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "doing": { "type": "string" },
+            "next": { "type": "string" },
+            "wait": { "type": "string" }
+        },
+        "required": ["doing", "next", "wait"]
+    });
+    stage(Stage::Writing);
+    let value = ask(
+        cfg,
+        &cfg.claude.summary_model,
+        &store::project_dir(slug),
+        schema,
+        &[],
+        &prompt,
+    )?;
+    let field = |name: &str| value[name].as_str().unwrap_or_default().trim().to_string();
+    Ok(Draft {
+        doing: field("doing"),
+        next: field("next"),
+        wait: checked_wait(&project, &field("wait")),
+    })
+}
+
+/// The suggested wait condition, if `ctx wait`'s parser takes it.
+fn checked_wait(project: &Project, text: &str) -> Option<String> {
+    let text = text.trim().trim_matches('`').trim();
+    if text.is_empty() {
+        return None;
+    }
+    let words: Vec<String> = text.split_whitespace().map(str::to_string).collect();
+    crate::wait::parse_shell(&words, |arg| ops::find_item(project, arg))
+        .ok()
+        .map(|_| text.to_string())
+}
+
+fn read_tail(path: &Path, bytes: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = file.seek(SeekFrom::Start(len.saturating_sub(bytes)));
+    let mut buf = Vec::new();
+    let _ = file.read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// The user's and Claude's text messages from the end of a transcript, oldest first, at most
+/// `limit` characters, but always the last one. Tool calls and results are left out.
+fn transcript_text(jsonl: &str, limit: usize) -> String {
+    let mut messages = Vec::new();
+    for line in jsonl.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let who = match value["type"].as_str() {
+            Some("user") => "User",
+            Some("assistant") => "Claude",
+            _ => continue,
+        };
+        let text = match &value["message"]["content"] {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(blocks) => blocks
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => continue,
+        };
+        let text = text.trim();
+        if !text.is_empty() {
+            messages.push(format!("{who}: {}", clip(text, 1500)));
+        }
+    }
+    let mut out = Vec::new();
+    let mut used = 0;
+    for m in messages.iter().rev() {
+        used += m.chars().count();
+        if used > limit && !out.is_empty() {
+            break;
+        }
+        out.push(m.as_str());
+    }
+    out.reverse();
+    out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Entry, State};
+
+    #[test]
+    fn a_transcript_gives_its_latest_text_messages() {
+        let jsonl = [
+            r#"{"type":"user","message":{"role":"user","content":"fix the parser"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed it."}]}}"#,
+            r#"{"type":"cost-state","sessionId":"x"}"#,
+            "not json",
+        ]
+        .join("\n");
+        assert_eq!(
+            transcript_text(&jsonl, 1000),
+            "User: fix the parser\nClaude: Fixed it."
+        );
+        assert_eq!(transcript_text(&jsonl, 5), "Claude: Fixed it.");
+    }
+
+    #[test]
+    fn a_suggested_wait_is_kept_only_when_it_parses() {
+        let project = Project {
+            name: "p".into(),
+            slug: "p".into(),
+            state: State::Live,
+            created: Utc::now(),
+            workspace: "p".into(),
+            dir: None,
+            next: String::new(),
+            handoff: None,
+            wait: None,
+            claude_sessions: Vec::new(),
+            dismissed: Vec::new(),
+            layout: Vec::new(),
+            items: vec![Entry {
+                added: Utc::now(),
+                item: ItemRef::AdoPr { id: 4711 },
+            }],
+        };
+        assert_eq!(
+            checked_wait(&project, "`closed 4711`").as_deref(),
+            Some("closed 4711")
+        );
+        assert_eq!(checked_wait(&project, "closed 99"), None);
+        assert_eq!(checked_wait(&project, "until soonish"), None);
+        assert_eq!(
+            checked_wait(&project, "answer from jdoe").as_deref(),
+            Some("answer from jdoe")
+        );
+        assert_eq!(checked_wait(&project, "  "), None);
+    }
+}

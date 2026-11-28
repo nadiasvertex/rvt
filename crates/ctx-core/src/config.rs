@@ -20,8 +20,8 @@ const DEFAULT_CONFIG: &str = r#"# Fill in [ado], [gitlab], or both. ctx follows 
 # host = "gitlab.example.com"
 # group = "your-group"
 
-[tmux]
-# Whether the freeze dialog starts with "close tmux session" checked.
+[workspace]
+# Whether the freeze dialog starts with "close the project's terminals" checked.
 close_on_freeze = false
 # Show a short summary of what changed when you switch to a project.
 switch_message = true
@@ -38,7 +38,7 @@ soft_limit = 5
 # The Claude config directory that summaries, briefs and sessions started with C run under.
 # Leave it empty to use your environment's.
 config_dir = ""
-# The command that C runs in a new tmux window to start a Claude session.
+# The command that starts a new Claude session.
 command = "claude"
 # Claude model aliases or full names. Summaries after a freeze and briefs on a thaw use
 # summary_model. ctx import uses import_model.
@@ -74,7 +74,9 @@ pub struct Config {
     #[serde(default)]
     pub gitlab: Option<GitLabConfig>,
     #[serde(default)]
-    pub tmux: TmuxConfig,
+    /// Read from `[workspace]`, or from `[tmux]` in configs written before the ctx app.
+    #[serde(alias = "tmux")]
+    pub workspace: WorkspaceConfig,
     #[serde(default)]
     pub watch: WatchConfig,
     #[serde(default)]
@@ -111,14 +113,14 @@ impl Config {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct TmuxConfig {
+pub struct WorkspaceConfig {
     pub close_on_freeze: bool,
     pub switch_message: bool,
 }
 
-impl Default for TmuxConfig {
+impl Default for WorkspaceConfig {
     fn default() -> Self {
-        TmuxConfig {
+        WorkspaceConfig {
             close_on_freeze: false,
             switch_message: true,
         }
@@ -265,7 +267,7 @@ group = "group"
         let cfg = parse(DEFAULT_CONFIG).unwrap();
         assert!(cfg.ado.is_none());
         assert!(cfg.gitlab.is_none());
-        assert!(!cfg.tmux.close_on_freeze);
+        assert!(!cfg.workspace.close_on_freeze);
         assert_eq!(cfg.watch.interval_minutes, 3);
         assert_eq!(cfg.live.soft_limit, 5);
         assert_eq!(cfg.claude.command, "claude");
@@ -273,6 +275,12 @@ group = "group"
         assert_eq!(cfg.claude.summary_model, "haiku");
         assert_eq!(cfg.claude.import_model, "sonnet");
         assert_eq!(cfg.claude.respond_model, "opus");
+    }
+
+    #[test]
+    fn a_tmux_section_from_an_older_config_still_counts() {
+        let cfg = parse("[tmux]\nclose_on_freeze = true\n").unwrap();
+        assert!(cfg.workspace.close_on_freeze);
     }
 
     #[test]
@@ -288,7 +296,7 @@ group = "group"
         assert_eq!(cfg.gitlab().unwrap().host, "gitlab.example.com");
         let err = cfg.ado().unwrap_err().to_string();
         assert!(err.starts_with("no [ado] section"), "{err}");
-        assert!(cfg.tmux.switch_message);
+        assert!(cfg.workspace.switch_message);
         assert_eq!(cfg.watch.interval_minutes, 3);
         assert!(cfg.claude.summarize_on_freeze);
         assert_eq!(cfg.claude.command, "claude");

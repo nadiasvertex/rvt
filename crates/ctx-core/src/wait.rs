@@ -42,11 +42,11 @@ pub enum Condition {
     },
     /// A date passes.
     Until { at: DateTime<Utc> },
-    /// A Claude Code session in the project stops or asks for input. With a pane, only sessions
+    /// A Claude Code session in the project stops or asks for input. With a terminal, only sessions
     /// in that terminal count.
     Claude {
-        #[serde(default)]
-        pane: Option<String>,
+        #[serde(default, rename = "pane")]
+        terminal: Option<String>,
     },
     /// A command started with `ctx run` exits.
     Command {
@@ -159,8 +159,8 @@ impl Wait {
 pub struct Event {
     pub time: DateTime<Utc>,
     pub kind: EventKind,
-    #[serde(default)]
-    pub pane: Option<String>,
+    #[serde(default, rename = "pane")]
+    pub terminal: Option<String>,
     #[serde(default)]
     pub session: Option<String>,
     #[serde(default)]
@@ -240,7 +240,7 @@ pub fn check(
             .filter(|s| s.status.eq_ignore_ascii_case(state))
             .map(|_| format!("{label} is {state}")),
         Condition::Until { at } => (now >= *at).then(|| "date reached".to_string()),
-        Condition::Claude { pane } => events
+        Condition::Claude { terminal } => events
             .iter()
             .filter(after)
             .filter(|e| {
@@ -249,7 +249,7 @@ pub fn check(
                     EventKind::ClaudeStop | EventKind::ClaudeNotification
                 )
             })
-            .filter(|e| pane.is_none() || e.pane == *pane)
+            .filter(|e| terminal.is_none() || e.terminal == *terminal)
             .next_back()
             .map(|e| match e.kind {
                 EventKind::ClaudeNotification => "Claude needs input".to_string(),
@@ -282,7 +282,7 @@ pub fn parse_shell(
     };
     match words.first().map(|w| w.to_lowercase()).as_deref() {
         None => Err("say what to wait on".into()),
-        Some("claude") => Ok(Condition::Claude { pane: None }),
+        Some("claude") => Ok(Condition::Claude { terminal: None }),
         Some("cmd" | "command") => Ok(Condition::Command {
             label: words[1..].join(" "),
         }),
@@ -370,19 +370,19 @@ pub fn parse_when(text: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     }
 }
 
-/// The pane a Claude session runs in: where it last started, unless it ended or another session
-/// started in that pane since.
-pub fn claude_pane(events: &[Event], id: &str) -> Option<String> {
+/// The terminal a Claude session runs in: where it last started, unless it ended or another
+/// session started in that terminal since.
+pub fn claude_terminal(events: &[Event], id: &str) -> Option<String> {
     let start = events
         .iter()
         .rposition(|e| e.kind == EventKind::ClaudeStart && e.session.as_deref() == Some(id))?;
-    let pane = events[start].pane.clone()?;
+    let terminal = events[start].terminal.clone()?;
     let gone = events[start + 1..].iter().any(|e| match e.kind {
-        EventKind::ClaudeStart => e.pane.as_deref() == Some(pane.as_str()),
+        EventKind::ClaudeStart => e.terminal.as_deref() == Some(terminal.as_str()),
         EventKind::ClaudeEnd => e.session.as_deref() == Some(id),
         _ => false,
     });
-    (!gone).then_some(pane)
+    (!gone).then_some(terminal)
 }
 
 #[cfg(test)]
@@ -658,22 +658,22 @@ mod tests {
         );
     }
 
-    fn event(kind: EventKind, time: DateTime<Utc>, pane: Option<&str>) -> Event {
+    fn event(kind: EventKind, time: DateTime<Utc>, terminal: Option<&str>) -> Event {
         Event {
             time,
             kind,
-            pane: pane.map(str::to_string),
+            terminal: terminal.map(str::to_string),
             session: None,
             detail: "0".into(),
         }
     }
 
     #[test]
-    fn a_claude_session_runs_in_the_pane_it_last_started_in_until_replaced_or_ended() {
+    fn a_claude_session_runs_in_the_terminal_it_last_started_in_until_replaced_or_ended() {
         let t = Utc::now();
-        let ev = |kind, pane: &str, id: &str| Event {
+        let ev = |kind, terminal: &str, id: &str| Event {
             session: Some(id.into()),
-            ..event(kind, t, Some(pane))
+            ..event(kind, t, Some(terminal))
         };
         let resumed = [
             ev(EventKind::ClaudeStart, "%2", "a"),
@@ -681,19 +681,19 @@ mod tests {
             ev(EventKind::ClaudeStart, "%3", "a"),
             ev(EventKind::ClaudeStart, "%2", "b"),
         ];
-        assert_eq!(claude_pane(&resumed, "a").as_deref(), Some("%3"));
-        assert_eq!(claude_pane(&resumed, "b").as_deref(), Some("%2"));
+        assert_eq!(claude_terminal(&resumed, "a").as_deref(), Some("%3"));
+        assert_eq!(claude_terminal(&resumed, "b").as_deref(), Some("%2"));
         let replaced = [
             ev(EventKind::ClaudeStart, "%2", "a"),
             ev(EventKind::ClaudeStart, "%2", "b"),
         ];
-        assert_eq!(claude_pane(&replaced, "a"), None);
+        assert_eq!(claude_terminal(&replaced, "a"), None);
         let ended = [
             ev(EventKind::ClaudeStart, "%2", "a"),
             ev(EventKind::ClaudeEnd, "%2", "a"),
         ];
-        assert_eq!(claude_pane(&ended, "a"), None);
-        assert_eq!(claude_pane(&ended, "never"), None);
+        assert_eq!(claude_terminal(&ended, "a"), None);
+        assert_eq!(claude_terminal(&ended, "never"), None);
     }
 
     #[test]
@@ -701,26 +701,29 @@ mod tests {
         let set = Utc::now();
         let before = set - Duration::seconds(5);
         let after = set + Duration::seconds(5);
-        let any = wait(Condition::Claude { pane: None }, set);
-        let in_pane = wait(
+        let any = wait(Condition::Claude { terminal: None }, set);
+        let in_terminal = wait(
             Condition::Claude {
-                pane: Some("%3".into()),
+                terminal: Some("%3".into()),
             },
             set,
         );
         let old = [event(EventKind::ClaudeStop, before, Some("%3"))];
         assert_eq!(check(&any, &BTreeMap::new(), &old, after), None);
 
-        let other_pane = [event(EventKind::ClaudeStop, after, Some("%4"))];
+        let other_terminal = [event(EventKind::ClaudeStop, after, Some("%4"))];
         assert_eq!(
-            check(&any, &BTreeMap::new(), &other_pane, after).as_deref(),
+            check(&any, &BTreeMap::new(), &other_terminal, after).as_deref(),
             Some("Claude finished")
         );
-        assert_eq!(check(&in_pane, &BTreeMap::new(), &other_pane, after), None);
+        assert_eq!(
+            check(&in_terminal, &BTreeMap::new(), &other_terminal, after),
+            None
+        );
 
         let asking = [event(EventKind::ClaudeNotification, after, Some("%3"))];
         assert_eq!(
-            check(&in_pane, &BTreeMap::new(), &asking, after).as_deref(),
+            check(&in_terminal, &BTreeMap::new(), &asking, after).as_deref(),
             Some("Claude needs input")
         );
 
@@ -793,7 +796,7 @@ mod tests {
         let words = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
         assert_eq!(
             parse_shell(&words("claude"), resolve),
-            Ok(Condition::Claude { pane: None })
+            Ok(Condition::Claude { terminal: None })
         );
         assert_eq!(
             parse_shell(&words("ci !1"), resolve),

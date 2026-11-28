@@ -47,12 +47,12 @@ pub struct Entry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Pane {
+pub struct Terminal {
     pub path: PathBuf,
 }
 
 /// A window of a project's workspace, saved and restored by the front end. The fields follow
-/// tmux, which is the only front end so far.
+/// the tmux front end that saved them before the ctx app.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Window {
     pub name: String,
@@ -61,7 +61,8 @@ pub struct Window {
     pub auto_name: bool,
     /// tmux's layout string, which `select-layout` takes back.
     pub layout: String,
-    pub panes: Vec<Pane>,
+    #[serde(rename = "panes")]
+    pub terminals: Vec<Terminal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,8 +71,9 @@ pub struct ClaudeSession {
     pub started: DateTime<Utc>,
     #[serde(default)]
     pub cwd: Option<PathBuf>,
-    #[serde(default)]
-    pub pane: Option<String>,
+    /// The terminal the session ran in.
+    #[serde(default, rename = "pane")]
+    pub terminal: Option<String>,
     /// `CLAUDE_CONFIG_DIR` of the session, so a resume runs under the same account.
     #[serde(default)]
     pub config_dir: Option<PathBuf>,
@@ -104,6 +106,11 @@ impl ClaudeSession {
     /// Whether Claude kept a transcript of the session. `claude --resume` needs one, and Claude
     /// writes none for a session that ends before the first message, or after it is deleted.
     pub fn resumable(&self) -> bool {
+        self.transcript().is_some()
+    }
+
+    /// The file Claude keeps the session's transcript in, if it exists.
+    pub fn transcript(&self) -> Option<PathBuf> {
         let config = self
             .config_dir
             .clone()
@@ -112,19 +119,17 @@ impl ClaudeSession {
         let projects = config.join("projects");
         let file = format!("{}.jsonl", self.id);
         if let Some(cwd) = &self.cwd {
-            if projects
-                .join(claude_project_name(cwd))
-                .join(&file)
-                .is_file()
-            {
-                return true;
+            let path = projects.join(claude_project_name(cwd)).join(&file);
+            if path.is_file() {
+                return Some(path);
             }
         }
         fs::read_dir(&projects)
             .into_iter()
             .flatten()
             .flatten()
-            .any(|e| e.path().join(&file).is_file())
+            .map(|e| e.path().join(&file))
+            .find(|p| p.is_file())
     }
 }
 
@@ -143,8 +148,9 @@ pub struct Project {
     pub slug: String,
     pub state: State,
     pub created: DateTime<Utc>,
-    /// The name of the project's workspace in the front end, such as a tmux session name.
-    pub session: String,
+    /// The name of the project's workspace in the front end.
+    #[serde(rename = "session")]
+    pub workspace: String,
     /// Where new terminals in the project start.
     #[serde(default)]
     pub dir: Option<PathBuf>,
@@ -345,7 +351,7 @@ pub fn create(name: &str, dir: Option<PathBuf>) -> Result<Project> {
         slug: slug.clone(),
         state: State::Live,
         created: Utc::now(),
-        session: slug.clone(),
+        workspace: slug.clone(),
         dir,
         next: String::new(),
         handoff: None,
@@ -713,7 +719,7 @@ mod tests {
             id: id.into(),
             started: Utc::now(),
             cwd: Some(PathBuf::from(cwd)),
-            pane: None,
+            terminal: None,
             config_dir: Some(config.clone()),
             name: None,
             frozen: None,
@@ -735,7 +741,7 @@ mod tests {
             id: format!("s{n}"),
             started: Utc::now(),
             cwd: None,
-            pane: None,
+            terminal: None,
             config_dir: None,
             name: None,
             frozen: frozen.then(|| FrozenSession {
@@ -800,7 +806,7 @@ mod tests {
             },
         });
         project.wait = Some(Wait::new(Condition::Claude {
-            pane: Some("%3".into()),
+            terminal: Some("%3".into()),
         }));
         project.handoff = Some(Handoff {
             time: Utc::now(),
@@ -812,13 +818,19 @@ mod tests {
             name: "edit".into(),
             auto_name: false,
             layout: "b25d,200x50,0,0,1".into(),
-            panes: vec![Pane {
+            terminals: vec![Terminal {
                 path: "/src/core".into(),
             }],
         }];
         save(&project).unwrap();
         let loaded = load("markdown-serial").unwrap();
         assert_eq!(loaded, project);
+        // The file keeps the names ctx 0.3 reads, so both versions can share the store.
+        let text =
+            std::fs::read_to_string(project_dir("markdown-serial").join("project.toml")).unwrap();
+        for name in ["session = ", "pane = ", "panes"] {
+            assert!(text.contains(name), "{name} in {text}");
+        }
 
         let second = create("Markdown serial", None).unwrap();
         assert_eq!(second.slug, "markdown-serial-2");
@@ -833,7 +845,7 @@ mod tests {
             slug: slugify(name),
             state: State::Live,
             created: Utc::now(),
-            session: slugify(name),
+            workspace: slugify(name),
             dir: None,
             next: String::new(),
             handoff: None,

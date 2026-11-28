@@ -33,7 +33,7 @@ jobs:
             target: x86_64-apple-darwin
             packages: --workspace
             test: false
-          # ctx drives tmux and uses Unix-only process APIs, so Windows builds rvt only.
+          # ctx uses Unix-only process APIs, so Windows builds rvt only.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             packages: --workspace --exclude ctx
@@ -41,8 +41,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Keep in step with rust-toolchain.toml, which cargo follows.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.100.0
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2

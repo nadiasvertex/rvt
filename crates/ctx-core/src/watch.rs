@@ -156,11 +156,11 @@ pub fn event(terminals: &dyn Terminals, kind: &str) -> Result<()> {
         let _ = std::io::stdin().read_to_string(&mut input);
     }
     let payload: HookPayload = serde_json::from_str(&input).unwrap_or_default();
-    let pane = terminals.current_terminal();
+    let terminal = terminals.current_terminal();
     let event = Event {
         time: Utc::now(),
         kind,
-        pane: pane.clone(),
+        terminal: terminal.clone(),
         session: payload.session_id.clone(),
         detail: payload
             .message
@@ -189,7 +189,7 @@ pub fn event(terminals: &dyn Terminals, kind: &str) -> Result<()> {
                         id,
                         started: Utc::now(),
                         cwd: payload.cwd,
-                        pane,
+                        terminal,
                         config_dir,
                         name,
                         frozen: None,
@@ -227,7 +227,7 @@ pub fn run_command(terminals: &dyn Terminals, args: &[String], set_wait: bool) -
             &Event {
                 time: Utc::now(),
                 kind: EventKind::CommandStart,
-                pane: terminals.current_terminal(),
+                terminal: terminals.current_terminal(),
                 session: None,
                 detail: label.clone(),
             },
@@ -254,7 +254,7 @@ pub fn run_command(terminals: &dyn Terminals, args: &[String], set_wait: bool) -
             &Event {
                 time: Utc::now(),
                 kind: EventKind::CommandExit,
-                pane: terminals.current_terminal(),
+                terminal: terminals.current_terminal(),
                 session: None,
                 detail: code.to_string(),
             },
@@ -262,25 +262,6 @@ pub fn run_command(terminals: &dyn Terminals, args: &[String], set_wait: bool) -
         ops::evaluate(terminals, slug);
     }
     Ok(code)
-}
-
-/// A short summary for the tmux status line, read from the project files only.
-pub fn status_line() -> String {
-    let projects = store::list();
-    let live = projects.iter().filter(|p| p.state == State::Live).count();
-    let ready = projects
-        .iter()
-        .filter(|p| match p.state {
-            State::Live => p.cleared().is_some(),
-            State::Frozen => !p.waiting(),
-            State::Done => false,
-        })
-        .count();
-    let mut parts = vec![format!("{live} live")];
-    if ready > 0 {
-        parts.push(format!("{ready} ready"));
-    }
-    format!("ctx {}", parts.join(" · "))
 }
 
 pub fn hooks_snippet() -> String {
